@@ -6,7 +6,7 @@ import { SheetPiece } from '@/core/fold/SheetPiece';
 import { buildSoftMesh } from '@/core/fold/soft/softMesh';
 import { FoldBook } from '@/core/fold/FoldBook';
 import { foldRequest, RECIPES } from '@/core/fold/recipes';
-import type { Recipe } from '@/core/fold/recipes';
+import type { Recipe, SpreadStep } from '@/core/fold/recipes';
 
 const sheet: SheetDefinition = {
   id: 'sheet.test', name: 'Test', description: '', size: 10, cells: 20,
@@ -65,7 +65,7 @@ describe('soft mesh', () => {
     const book = FoldBook.sheet(20);
     book.fold({ line: line('x', 5), side: 1, seeds: book.faces });
     const flap = new Set(book.faces.filter((f) => book.flipped[f] === 1));
-    const mesh = buildSoftMesh(book, 10, flap);
+    const mesh = buildSoftMesh(book, 10, [flap]);
     expect(mesh.triCount).toBe(800);
     // 441 of the flat sheet: the spine stays shared, nothing else does.
     expect(mesh.vertexCount).toBe(441);
@@ -220,6 +220,78 @@ describe('folded paper in the solver', () => {
     const tops = [...wing].filter((f) => book.stackOf(f).at(-1) === f);
     expect(tops.length).toBeGreaterThan(20);
     for (const top of tops) expect(piece.flapToLift(top)).toEqual(wing);
+  });
+
+  /** Runs a recipe on real paper, leaving out any step that opens it. */
+  const foldedRecipe = (id: string) => {
+    let piece = new SheetPiece(sheet);
+    const recipe = RECIPES.find((r) => r.id === id) as Recipe;
+    for (const step of recipe.steps) {
+      if (step.action === 'trim') {
+        const pieces = piece.cut({ kind: step.kind, c: step.at * 2 * U }, step.from * 2 * U, step.to * 2 * U);
+        piece = pieces.reduce((a, b) => (b.book.faces.length > a.book.faces.length ? b : a));
+      } else if (step.action === 'fold') {
+        expect(piece.fold(foldRequest(piece.book, 10, step)).failure).toBeNull();
+      }
+    }
+    return { piece, spread: recipe.steps.find((step) => step.action === 'spread') as SpreadStep };
+  };
+  const outer = (piece: SheetPiece, under: boolean) => {
+    const { book } = piece;
+    const faces = [...book.stacks.values()].map((stack) => (under ? stack[0] : stack.at(-1)) as number);
+    // Near the tail, and as far out along the wing as it goes.
+    const tail = faces.filter((f) => (book.at[f * 6 + 1] as number) > 9 * 2 * U);
+    return tail.reduce((far, f) => ((book.at[f * 6] as number) > (book.at[far * 6] as number) ? f : far));
+  };
+
+  it('lifts both wings at once, each from its own side, without welding them', () => {
+    const { piece } = foldedRecipe('plane');
+    expect(piece.peel(outer(piece, false))).toBe(true);
+    piece.fixFlaps();
+    expect(piece.peel(outer(piece, true), true)).toBe(true);
+    const { triFlap } = piece.soft.mesh;
+    expect(triFlap.filter((f) => f === 0).length).toBeGreaterThan(10);
+    expect(triFlap.filter((f) => f === 1).length).toBeGreaterThan(10);
+    expect(piece.lifted.size).toBe(224);
+  });
+
+  it('keeps a wing open once fixed, where a loose wing falls shut', () => {
+    const opened = (fix: boolean) => {
+      const { piece } = foldedRecipe('plane');
+      const wing = outer(piece, false);
+      piece.peel(wing);
+      const { soft } = piece;
+      // Hands on the body at both ends, and one on the wing.
+      const body = Array.from({ length: soft.mesh.triCount }, (_, t) => t).filter((t) => soft.mesh.triFlap[t] === -1);
+      for (const t of [body[0] as number, body.at(-1) as number]) soft.pinPoint(soft.addPin(t, 1, 0, 0), { x: 0, y: 0, z: 0 });
+      for (const pin of soft.pins) soft.pinPoint(pin, pin);
+      const hand = soft.addPin(soft.mesh.faceTri[wing] as number, 1, 0, 0);
+      soft.pinPoint(hand, hand);
+      for (let i = 0; i < 120; i++) {
+        hand.y = Math.min(1.8, hand.y + 0.03);
+        piece.step(DT);
+      }
+      if (fix) piece.fixFlaps();
+      soft.removePin(hand);
+      run(piece, 180);
+      return heights(piece).top;
+    };
+    const [fixed, loose] = [opened(true), opened(false)];
+    console.log('wing height after letting go, fixed and loose', fixed.toFixed(2), loose.toFixed(2));
+    expect(fixed).toBeGreaterThan(loose + 0.4);
+  });
+
+  it('spreads a plane without stretching it or changing its folds', () => {
+    for (const id of ['plane', 'dart']) {
+      const { piece, spread } = foldedRecipe(id);
+      expect(piece.spread(spread)).toBe(true);
+      expect(piece.soft.stretch()).toBeLessThan(0.01);
+      expect(piece.fixedFlaps).toBe(2);
+      expect(piece.book.violations()).toBe(0);
+      // Wings open upwards from the hinge, in a V above the keel.
+      expect(heights(piece).top).toBeGreaterThan(spread.height + 0.4);
+      expect(heights(piece).low).toBeLessThan(spread.height - 0.4);
+    }
   });
 
   it('refuses to peel a flap with another layer on top of it', () => {

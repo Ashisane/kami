@@ -34,6 +34,8 @@ export interface CaptureRequest {
   /** Seconds into the clip. */
   time?: number;
   camera?: CameraAngle;
+  /** Azimuth and elevation in degrees, then the point looked at. Overrides `camera`. */
+  aim?: [number, number, number, number, number];
   /** Above 1 moves closer than the default framing. */
   zoom?: number;
   view?: ViewMode;
@@ -130,6 +132,10 @@ export function installDebugApi({ stage, store }: LibraryContext, selectionLoade
       stage.frameSubject();
       if (request.zoom) stage.rig.zoom(request.zoom);
       stage.view(request.camera ?? 'hero', true);
+      if (request.aim) {
+        const [azimuth, elevation, x, y, z] = request.aim;
+        stage.rig.aim([x, y, z], azimuth, elevation);
+      }
       stage.step();
       await document.fonts.ready;
     },

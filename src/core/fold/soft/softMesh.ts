@@ -11,8 +11,8 @@ import { layerHeights } from '../levels';
  * The cloth is one surface through the middle of the paper's thickness, and
  * `cornerHeight` says how far each real layer sits from it.
  *
- * `peeled` faces stay out of the merge, so a flap can lift away from the stack
- * while staying joined to it along its crease.
+ * `flaps` stay out of the merge, each on its own, so a flap can lift away from
+ * the stack while staying joined to it along its crease.
  */
 export interface SoftMesh {
   vertexCount: number;
@@ -23,6 +23,8 @@ export interface SoftMesh {
   triCount: number;
   /** How many layers each triangle stands for. */
   triLayers: Int32Array;
+  /** Which flap each triangle belongs to, or -1 for the stack. */
+  triFlap: Int32Array;
   /** Vertex pairs, two per edge. */
   edges: Int32Array;
   edgeLength: Float64Array;
@@ -31,6 +33,8 @@ export interface SoftMesh {
   hingeLayers: Float64Array;
   /** 1 where a hinge is a made crease, which wants to stay shut. */
   hingeFolded: Uint8Array;
+  /** Which flap a hinge turns, or -1. */
+  hingeFlap: Int32Array;
   /** Which triangle each book face belongs to, by face id; -1 if not in this piece. */
   faceTri: Int32Array;
   /** Which vertex each face corner belongs to: index by face * 3 + corner. */
@@ -69,7 +73,7 @@ class Corners {
   }
 }
 
-export function buildSoftMesh(book: FoldBook, size: number, peeled: ReadonlySet<number> = new Set()): SoftMesh {
+export function buildSoftMesh(book: FoldBook, size: number, flaps: readonly ReadonlySet<number>[] = []): SoftMesh {
   const corners = new Corners(book.faceCount * 3);
   const { rest, at, neighbour } = book;
   const unit = metresPerUnit(book, size);
@@ -90,14 +94,24 @@ export function buildSoftMesh(book: FoldBook, size: number, peeled: ReadonlySet<
     }
   }
 
-  // Layers in one stack weld together, group by group.
+  // Layers in one stack weld together, group by group: the stack, then each flap.
+  const flapOf = new Int32Array(book.faceCount).fill(-1);
+  flaps.forEach((flap, i) => {
+    for (const f of flap) flapOf[f] = i;
+  });
   const groups: number[][] = [];
+  const groupFlap: number[] = [];
   for (const stack of book.stacks.values()) {
-    const base = stack.filter((f) => !peeled.has(f));
-    const lifted = stack.filter((f) => peeled.has(f));
-    for (const group of [base, lifted]) {
-      if (group.length === 0) continue;
+    const split = new Map<number, number[]>();
+    for (const f of stack) {
+      const flap = flapOf[f] as number;
+      const list = split.get(flap);
+      if (list) list.push(f);
+      else split.set(flap, [f]);
+    }
+    for (const [flap, group] of split) {
       groups.push(group);
+      groupFlap.push(flap);
       const first = group[0] as number;
       for (const f of group) {
         for (let k = 0; k < 3; k++) {
@@ -171,6 +185,7 @@ export function buildSoftMesh(book: FoldBook, size: number, peeled: ReadonlySet<
   const hingeList: number[] = [];
   const hingeLayerList: number[] = [];
   const hingeFoldedList: number[] = [];
+  const hingeFlapList: number[] = [];
   const opposite = (t: number, a: number, b: number) => {
     for (let k = 0; k < 3; k++) {
       const v = tris[t * 3 + k] as number;
@@ -178,7 +193,6 @@ export function buildSoftMesh(book: FoldBook, size: number, peeled: ReadonlySet<
     }
     return -1;
   };
-  const isLifted = (t: number) => peeled.has((groups[t] as number[])[0] as number);
   /** True when two wings lie on the same side of an edge, so the paper there is folded shut. */
   const sameSide = (a: number, b: number, c: number, d: number) => {
     const ax = flat[a * 2] as number, az = flat[a * 2 + 1] as number;
@@ -202,10 +216,13 @@ export function buildSoftMesh(book: FoldBook, size: number, peeled: ReadonlySet<
         const t = list[j] as number;
         const wingS = opposite(s, a, b), wingT = opposite(t, a, b);
         const folded = sameSide(a, b, wingS, wingT);
-        if (folded && isLifted(s) === isLifted(t)) continue;
+        const flapS = groupFlap[s] as number, flapT = groupFlap[t] as number;
+        // Layers folded together stay together, and two flaps only meet through the stack.
+        if (folded && (flapS === flapT || (flapS >= 0 && flapT >= 0))) continue;
         hingeList.push(a, b, wingS, wingT);
         hingeLayerList.push(((triLayers[s] as number) + (triLayers[t] as number)) / 2);
         hingeFoldedList.push(folded ? 1 : 0);
+        hingeFlapList.push(Math.max(flapS, flapT));
       }
     }
   }
@@ -237,11 +254,13 @@ export function buildSoftMesh(book: FoldBook, size: number, peeled: ReadonlySet<
     tris,
     triCount,
     triLayers,
+    triFlap: Int32Array.from(groupFlap),
     edges,
     edgeLength,
     hinges: Int32Array.from(hingeList),
     hingeLayers: Float64Array.from(hingeLayerList),
     hingeFolded: Uint8Array.from(hingeFoldedList),
+    hingeFlap: Int32Array.from(hingeFlapList),
     faceTri,
     cornerVertex,
     cornerHeight,

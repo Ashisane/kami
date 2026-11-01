@@ -110,6 +110,8 @@ async function boot(): Promise<void> {
     else if (event.key === 'r') stage.lab?.reset();
     else if (event.key === 'x' && stage.lab) stage.lab.tool = stage.lab.tool === 'cut' ? 'fold' : 'cut';
     else if (event.key === 'n') stage.lab?.nextStep();
+    else if (event.key === 'b') stage.lab?.fixFlap();
+    else if (event.key === 'u') stage.lab?.holdUp();
     else if (event.key === 'Escape') stage.lab?.letGoAll();
   });
 

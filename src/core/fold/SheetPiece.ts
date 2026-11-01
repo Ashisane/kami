@@ -2,15 +2,22 @@ import type { SheetDefinition } from '../asset/sheetTypes';
 import { FoldBook } from './FoldBook';
 import type { FoldPlan, FoldRequest } from './FoldBook';
 import { applyOpen } from './recipes';
-import type { OpenStep } from './recipes';
+import type { OpenStep, SpreadStep } from './recipes';
 import type { ReshapeFailure } from './reshape';
-import { reflectX, reflectZ, sideOf } from './lattice';
+import { reflectX, reflectZ, sideOf, UNITS_PER_CELL } from './lattice';
 import type { MirrorLine } from './lattice';
 import { extractRotation, rotateInto } from './soft/rotation';
 import type { Quat } from './soft/rotation';
 import { buildSoftMesh, metresPerUnit } from './soft/softMesh';
 import { CONTACT_GAP, SoftSheet } from './soft/SoftSheet';
 import type { SoftSettings } from './soft/SoftSheet';
+
+/** Paper lifted off its stack, turning on one crease. */
+interface Flap {
+  faces: ReadonlySet<number>;
+  /** True once its crease is bent for good, so it stays where it was left. */
+  fixed: boolean;
+}
 
 /**
  * One connected piece of paper: the exact Book plus the floppy cloth built from
@@ -19,8 +26,8 @@ import type { SoftSettings } from './soft/SoftSheet';
  */
 export class SheetPiece {
   soft: SoftSheet;
-  /** Faces currently lifted off their stack, or empty. */
-  private peeled: ReadonlySet<number> = new Set();
+  /** Flaps lifted off their stacks right now. */
+  private flaps: Flap[] = [];
 
   /** Goes up whenever the cloth is rebuilt, so a view knows to rebuild too. */
   revision = 0;
@@ -83,8 +90,11 @@ export class SheetPiece {
 
   /** Replaces the cloth. Pins hold triangles that no longer exist, so their owners must re-grip. */
   private rebuild(positions: (mesh: ReturnType<typeof buildSoftMesh>) => Float64Array): void {
-    const mesh = buildSoftMesh(this.book, this.definition.size, this.peeled);
+    const mesh = buildSoftMesh(this.book, this.definition.size, this.flaps.map((flap) => flap.faces));
     this.soft = new SoftSheet(mesh, this.solverSettings(), positions(mesh));
+    this.flaps.forEach((flap, i) => {
+      if (flap.fixed) this.soft.fixFlap(i);
+    });
     this.revision++;
   }
 
@@ -96,7 +106,7 @@ export class SheetPiece {
     const frame = this.frameOf(plan.moved);
 
     this.book.fold(request);
-    this.peeled = new Set();
+    this.flaps = [];
     this.previousCorners = before;
     this.lastSwing = swing ? { line: request.line, moved: plan.moved } : null;
 
@@ -137,7 +147,7 @@ export class SheetPiece {
     const frame = this.frameOf(new Set());
     const failure = applyOpen(this.book, this.definition.size, step);
     if (failure) return failure;
-    this.peeled = new Set();
+    this.flaps = [];
     this.rebuild((mesh) => {
       const out = new Float64Array(mesh.vertexCount * 3);
       const landing = new Float64Array(3);
@@ -236,9 +246,9 @@ export class SheetPiece {
    * on the same crease, and they lift as one.
    * The longest crease that leaves the flap free to lift is the one it turns on.
    * If nothing can lift, this answers with the longest crease's flap, or just the
-   * flat paper when that would be the whole piece.
+   * flat paper when that would be the whole piece. `under` works from the far side.
    */
-  flapOf(face: number): Set<number> {
+  flapOf(face: number, under = false): Set<number> {
     const { book } = this;
     const flat = this.flatRegion(face);
 
@@ -253,9 +263,9 @@ export class SheetPiece {
     }
     let longest: Set<number> | null = null;
     for (const [hinge] of [...crease].sort((a, b) => b[1] - a[1])) {
-      const flap = this.turningOn(face, hinge);
+      const flap = this.turningOn(face, hinge, under);
       if (flap.size === book.faces.length) continue;
-      if (!this.heldDown(flap)) return flap;
+      if (!this.heldDown(flap, under)) return flap;
       longest ??= flap;
     }
     return longest ?? flat;
@@ -264,10 +274,11 @@ export class SheetPiece {
   /**
    * Everything that swings with a face when it turns on a line. Cutting the paper
    * along the line splits it into parts. What the face is joined to across the line
-   * stays behind, and every other part lying on top of that swings too. Returns the
-   * whole piece if the line does not actually part the paper.
+   * stays behind, and every other part lying outside of that swings too. A tab tucked
+   * between the layers that stay is held by them, so it stays. Returns the whole
+   * piece if the line does not actually part the paper.
    */
-  private turningOn(face: number, hinge: string): Set<number> {
+  private turningOn(face: number, hinge: string, under: boolean): Set<number> {
     const { book } = this;
     const part = new Int32Array(book.faceCount).fill(-1);
     let parts = 0;
@@ -299,11 +310,12 @@ export class SheetPiece {
         }
       }
       for (const stack of book.stacks.values()) {
-        let aboveStaying = false;
-        for (const f of stack) {
-          const p = part[f] as number;
-          if (staying.has(p)) aboveStaying = true;
-          else if (aboveStaying && !swinging.has(p)) {
+        if (!stack.some((f) => staying.has(part[f] as number))) continue;
+        // In from the outside, up to the first layer that stays.
+        for (let i = 0; i < stack.length; i++) {
+          const p = part[stack[under ? i : stack.length - 1 - i] as number] as number;
+          if (staying.has(p)) break;
+          if (!swinging.has(p)) {
             swinging.add(p);
             grew = true;
           }
@@ -314,46 +326,59 @@ export class SheetPiece {
     return new Set(book.faces.filter((f) => swinging.has(part[f] as number)));
   }
 
-  /** True if another layer is lying on top of any part of this paper. */
-  private heldDown(flap: ReadonlySet<number>): boolean {
+  /** True if another layer is lying on the outside of any part of this paper. */
+  private heldDown(flap: ReadonlySet<number>, under: boolean): boolean {
     for (const f of flap) {
       const stack = this.book.stackOf(f);
-      if (stack.slice(stack.indexOf(f) + 1).some((g) => !flap.has(g))) return true;
+      const at = stack.indexOf(f);
+      if ((under ? stack.slice(0, at) : stack.slice(at + 1)).some((g) => !flap.has(g))) return true;
     }
     return false;
   }
 
-  /** Faces currently lifted off their stack. */
-  get lifted(): ReadonlySet<number> {
-    return this.peeled;
-  }
-
   /**
    * The flap that pulling this face would lift, or null if none can: not when it
-   * is the whole piece, nor when another layer is lying on top of any part of it.
+   * is the whole piece, nor when another layer is lying on the outside of it, nor
+   * when any of it has already been lifted.
    */
-  flapToLift(face: number): Set<number> | null {
-    const flap = this.flapOf(face);
-    if (flap.size === this.book.faces.length || this.heldDown(flap)) return null;
+  flapToLift(face: number, under = false): Set<number> | null {
+    const flap = this.flapOf(face, under);
+    if (flap.size === this.book.faces.length || this.heldDown(flap, under)) return null;
+    const { lifted } = this;
+    if ([...flap].some((f) => lifted.has(f))) return null;
     return [...flap].some((f) => this.book.depth(f) > 1) ? flap : null;
   }
 
+  /** The way the paper's top faces in the world, read from the paper that is not lifted. */
+  private surfaceUp(): [number, number, number] {
+    const frame = this.frameOf(this.lifted);
+    const origin = new Float64Array(3), ax = new Float64Array(3), az = new Float64Array(3);
+    frame(0, 0, origin);
+    frame(1, 0, ax);
+    frame(0, 1, az);
+    const ux = (ax[0] as number) - (origin[0] as number), uy = (ax[1] as number) - (origin[1] as number), uz = (ax[2] as number) - (origin[2] as number);
+    const vx = (az[0] as number) - (origin[0] as number), vy = (az[1] as number) - (origin[1] as number), vz = (az[2] as number) - (origin[2] as number);
+    return [vy * uz - vz * uy, vz * ux - vx * uz, vx * uy - vy * ux];
+  }
+
   /** Lifts a flap off the stack so it can be folded alone. */
-  peel(face: number): boolean {
-    const flap = this.flapToLift(face);
+  peel(face: number, under = false): boolean {
+    const flap = this.flapToLift(face, under);
     if (!flap) return false;
 
     const before = this.corners();
-    this.peeled = flap;
-    const lift = CONTACT_GAP * 1.5;
+    const [nx, ny, nz] = this.surfaceUp();
+    this.flaps = [...this.flaps, { faces: flap, fixed: false }];
+    const lift = CONTACT_GAP * 1.5 * (under ? -1 : 1);
     this.rebuild((mesh) => {
       const out = new Float64Array(mesh.vertexCount * 3);
       for (const f of this.book.faces) {
+        const k0 = flap.has(f) ? lift : 0;
         for (let k = 0; k < 3; k++) {
           const v = mesh.cornerVertex[f * 3 + k] as number;
-          out[v * 3] = before[f * 9 + k * 3] as number;
-          out[v * 3 + 1] = (before[f * 9 + k * 3 + 1] as number) + (flap.has(f) ? lift : 0);
-          out[v * 3 + 2] = before[f * 9 + k * 3 + 2] as number;
+          out[v * 3] = (before[f * 9 + k * 3] as number) + nx * k0;
+          out[v * 3 + 1] = (before[f * 9 + k * 3 + 1] as number) + ny * k0;
+          out[v * 3 + 2] = (before[f * 9 + k * 3 + 2] as number) + nz * k0;
         }
       }
       return out;
@@ -361,12 +386,128 @@ export class SheetPiece {
     return true;
   }
 
-  /** Lets a lifted flap fall back into the stack. */
+  /** Bends every flap still being pulled for good, at the angle it is held. Returns how many. */
+  fixFlaps(): number {
+    let count = 0;
+    this.flaps.forEach((flap, i) => {
+      if (flap.fixed) return;
+      flap.fixed = true;
+      this.soft.fixFlap(i);
+      count++;
+    });
+    return count;
+  }
+
+  /** Takes a fixed flap back in hand, so it can be moved. Returns false if this face is on none. */
+  unfix(face: number): boolean {
+    const i = this.flaps.findIndex((flap) => flap.fixed && flap.faces.has(face));
+    if (i < 0) return false;
+    (this.flaps[i] as Flap).fixed = false;
+    this.soft.unfixFlap(i);
+    return true;
+  }
+
+  /** True while a flap is lifted but not fixed: someone has it in hand. */
+  get pulling(): boolean {
+    return this.flaps.some((flap) => !flap.fixed);
+  }
+
+  get fixedFlaps(): number {
+    return this.flaps.filter((flap) => flap.fixed).length;
+  }
+
+  /**
+   * Stands the paper up on its keel with its wings opened out, as hands would hold
+   * a plane. The Book does not change: this is shape, which only the cloth owns.
+   */
+  spread(step: SpreadStep): boolean {
+    const { book, definition } = this;
+    const scale = (book.cells * UNITS_PER_CELL) / definition.size;
+    const axis = { across: step.hinge.kind, c: step.hinge.at * scale };
+    const hinge = `${axis.across}${axis.c}`;
+    const chosen = step.wings.map(({ at, under }) => {
+      const faces = this.turningOn(this.outerFaceAt(at[0] * scale, at[1] * scale, under), hinge, under);
+      return { faces, under };
+    });
+    if (chosen.some(({ faces, under }) => faces.size === book.faces.length || this.heldDown(faces, under))) return false;
+
+    // Which way the keel lies from the hinge: towards the paper that stays.
+    const hingeAt = this.toMetres(axis.c);
+    const stays = book.faces.filter((f) => !chosen.some((wing) => wing.faces.has(f)));
+    const across = stays.reduce((sum, f) => sum + (axis.across === 'x' ? (book.at[f * 6] as number) : (book.at[f * 6 + 1] as number)), 0) / stays.length;
+    const toKeel = this.toMetres(across) > hingeAt ? 1 : -1;
+
+    this.flaps = chosen.map((wing) => ({ faces: wing.faces, fixed: true }));
+    const flapOfVertex = (mesh: ReturnType<typeof buildSoftMesh>) => {
+      const owner = new Int32Array(mesh.vertexCount).fill(-1);
+      chosen.forEach((wing, i) => {
+        for (const f of wing.faces) for (let k = 0; k < 3; k++) owner[mesh.cornerVertex[f * 3 + k] as number] = i;
+      });
+      return owner;
+    };
+    const open = (step.angle * Math.PI) / 180;
+    this.rebuild((mesh) => {
+      const owner = flapOfVertex(mesh);
+      const out = new Float64Array(mesh.vertexCount * 3);
+      let middle = 0;
+      for (let v = 0; v < mesh.vertexCount; v++) middle += mesh.flat[v * 2 + (axis.across === 'x' ? 1 : 0)] as number;
+      middle /= mesh.vertexCount;
+      for (let v = 0; v < mesh.vertexCount; v++) {
+        const fx = mesh.flat[v * 2] as number, fz = mesh.flat[v * 2 + 1] as number;
+        const along = (axis.across === 'x' ? fz : fx) - middle;
+        const drop = ((axis.across === 'x' ? fx : fz) - hingeAt) * toKeel;
+        const wing = owner[v] as number;
+        const side = wing < 0 ? 0 : (chosen[wing] as { under: boolean }).under ? -1 : 1;
+        const down = wing < 0 ? drop : drop * Math.cos(open);
+        const out1 = wing < 0 ? 0 : drop * Math.sin(open) * side;
+        const i = v * 3;
+        if (axis.across === 'x') {
+          out[i] = out1 * toKeel;
+          out[i + 2] = along + middle;
+        } else {
+          out[i] = along + middle;
+          out[i + 2] = -out1 * toKeel;
+        }
+        out[i + 1] = step.height - down;
+      }
+      return out;
+    });
+    return true;
+  }
+
+  /** The outermost face over a lattice point, on the top of the stack or the underside. */
+  private outerFaceAt(x: number, z: number, under: boolean): number {
+    const { book } = this;
+    let best = -1, bestDistance = Infinity;
+    for (const stack of book.stacks.values()) {
+      const f = (under ? stack[0] : stack[stack.length - 1]) as number;
+      const i = f * 6;
+      const cx = ((book.at[i] as number) + (book.at[i + 2] as number) + (book.at[i + 4] as number)) / 3;
+      const cz = ((book.at[i + 1] as number) + (book.at[i + 3] as number) + (book.at[i + 5] as number)) / 3;
+      const distance = Math.hypot(cx - x, cz - z);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        best = f;
+      }
+    }
+    return best;
+  }
+
+  /** Faces currently lifted off their stack. */
+  get lifted(): ReadonlySet<number> {
+    const all = new Set<number>();
+    for (const flap of this.flaps) for (const f of flap.faces) all.add(f);
+    return all;
+  }
+
+  /** Lets any flap not fixed fall back into the stack. */
   settle(): void {
-    if (this.peeled.size === 0) return;
+    const falling = new Set<number>();
+    for (const flap of this.flaps) if (!flap.fixed) for (const f of flap.faces) falling.add(f);
+    if (falling.size === 0) return;
     const before = this.corners();
-    const flap = this.peeled;
-    this.peeled = new Set();
+    const flap = falling;
+    this.flaps = this.flaps.filter((f) => f.fixed);
     this.previousCorners = before;
     this.lastSwing = null;
     this.rebuild((mesh) => {
@@ -389,6 +530,7 @@ export class SheetPiece {
   /** Cuts along a stretch of a line. Returns every resulting piece, this one first. */
   cut(line: MirrorLine, from: number, to: number): SheetPiece[] {
     const before = this.corners();
+    this.flaps = [];
     const books = this.book.cutAlong(line, from, to);
     const pieces = books.map((book) => {
       if (book === this.book) return this;

@@ -52,7 +52,24 @@ export interface OpenStep {
   ready?: FoldStep[];
 }
 
-export type RecipeStep = FoldStep | TrimStep | OpenStep;
+/**
+ * Opens wings out and stands the paper up on its keel, for the moment a crew holds
+ * it up to harden. Shape only: the Book keeps the folds it has.
+ */
+export interface SpreadStep {
+  action: 'spread';
+  label: string;
+  /** The straight crease both wings turn on, in metres as the paper lies. */
+  hinge: { kind: 'x' | 'z'; at: number };
+  /** A point on each wing, in metres as the paper lies, on the top or the underside. */
+  wings: { at: [number, number]; under: boolean }[];
+  /** Degrees each wing opens from its body. 90 is square to it. */
+  angle: number;
+  /** Where the hinge is held, in metres off the ground. */
+  height: number;
+}
+
+export type RecipeStep = FoldStep | TrimStep | OpenStep | SpreadStep;
 
 export interface Recipe {
   id: string;
@@ -61,6 +78,8 @@ export interface Recipe {
   source: string;
   /** What is left for players to do by hand. */
   finish: string;
+  /** Starts with the sheet turned over, so the printed face ends up outside. */
+  faceDown?: boolean;
   steps: RecipeStep[];
 }
 
@@ -148,6 +167,7 @@ export function runRecipe(recipe: Recipe, start: FoldBook, size: number): { book
       if (failed) return { book, failure: `${step.label}: ${failed}` };
       continue;
     }
+    if (step.action === 'spread') continue;
     const plan = applyFold(book, size, step);
     if (plan.failure) return { book, failure: `${step.label}: ${plan.failure}` };
   }
@@ -165,6 +185,33 @@ const boatBack = fold('Fold the back bottom point up', 'diff', -5, -1, 'bottom',
 
 /** Real planes and boats start from a page, taller than it is wide. */
 const trim = (width: number): TrimStep => ({ action: 'trim', label: `Cut the sheet down to ${width} by 10 m`, kind: 'x', at: width, from: 0, to: 10 });
+
+/** Every plane starts the same way: the Nakamura lock, folded in half. */
+const planeBody: RecipeStep[] = [
+  trim(6),
+  fold('Top left corner to the centre line', 'sum', 3, -1, 'top'),
+  fold('Top right corner to the centre line', 'diff', 3, 1, 'top'),
+  fold('Fold the triangle down', 'z', 4, -1, 'all'),
+  fold('New left corner to the centre line', 'sum', 7, -1, 'all'),
+  fold('New right corner to the centre line', 'diff', -1, 1, 'all'),
+  fold('Fold the tip up over them: the Nakamura lock', 'z', 7, 1, 'top', { hold: [3, 7.6] }),
+  fold('Fold in half behind, with the flaps outside', 'x', 3, 1, 'all', { landing: { kind: 'under' } }),
+];
+
+/** `crease` sets the keel: it is the distance from there to the fold down the middle. */
+const planeWings = (crease: number): RecipeStep[] => [
+  fold('Fold the top wing down', 'x', crease, -1, 'all', { from: { axis: 'x', max: 3 } }),
+  fold('Fold the other wing down', 'x', crease, -1, 'all', { from: { axis: 'x', min: 3 }, landing: { kind: 'under' } }),
+];
+
+const spreadWings = (crease: number, angle: number, at: [number, number]): SpreadStep => ({
+  action: 'spread',
+  label: 'Open the wings and hold it up',
+  hinge: { kind: 'x', at: crease },
+  wings: [{ at, under: false }, { at, under: true }],
+  angle,
+  height: 2.4,
+});
 
 export const RECIPES: readonly Recipe[] = [
   {
@@ -203,18 +250,21 @@ export const RECIPES: readonly Recipe[] = [
     id: 'plane',
     name: 'Nakamura plane',
     source: 'Nakamura Lock, after the Southwest Adopt-A-Pilot sheet',
-    finish: 'Flat so far. Pin the body, pull a wing up, then harden. That is the sheet\'s last step: bend the wings up.',
+    finish: 'Two hands hold it up, wings open. Press Harden to keep it.',
+    faceDown: true,
+    steps: [...planeBody, ...planeWings(2), spreadWings(2, 118, [3, 8])],
+  },
+  {
+    id: 'dart',
+    name: 'Dart',
+    source: 'The Nakamura plane with its tail cut off, so each wing comes to a point',
+    finish: 'Two hands hold it up, wings open. Press Harden to keep it.',
+    faceDown: true,
     steps: [
-      trim(6),
-      fold('Top left corner to the centre line', 'sum', 3, -1, 'top'),
-      fold('Top right corner to the centre line', 'diff', 3, 1, 'top'),
-      fold('Fold the triangle down', 'z', 4, -1, 'all'),
-      fold('New left corner to the centre line', 'sum', 7, -1, 'all'),
-      fold('New right corner to the centre line', 'diff', -1, 1, 'all'),
-      fold('Fold the tip up over them: the Nakamura lock', 'z', 7, 1, 'top', { hold: [3, 7.6] }),
-      fold('Fold in half behind, with the flaps outside', 'x', 3, 1, 'all', { landing: { kind: 'under' } }),
-      fold('Fold the top wing down', 'x', 1.5, -1, 'all', { from: { axis: 'x', max: 3 } }),
-      fold('Fold the other wing down', 'x', 1.5, -1, 'all', { from: { axis: 'x', min: 3 }, landing: { kind: 'under' } }),
+      ...planeBody,
+      { action: 'trim', label: 'Cut the tail off, through every layer', kind: 'z', at: 7, from: 0, to: 6 },
+      ...planeWings(2.5),
+      spreadWings(2.5, 118, [3.5, 6.5]),
     ],
   },
   {

@@ -94,6 +94,8 @@ export function foldPanel({ stage }: LibraryContext): HTMLElement {
         h('li', {}, h('strong', {}, 'Right click a pin'), h('span', {}, 'let go with no crease')),
         h('li', {}, h('strong', {}, 'Wheel'), h('span', {}, 'raise or lower while dragging')),
         h('li', {}, h('strong', {}, 'Shift'), h('span', {}, 'grip every layer at that point')),
+        h('li', {}, h('strong', {}, 'Ctrl'), h('span', {}, 'reach the underside, for the flap below')),
+        h('li', {}, h('strong', {}, 'B'), h('span', {}, 'bend a lifted flap: it stays at that angle')),
       ),
     ),
     section(
@@ -103,7 +105,7 @@ export function foldPanel({ stage }: LibraryContext): HTMLElement {
     ),
     section(
       'Finish',
-      h('div.button-row', {}, harden),
+      h('div.button-row', {}, button('Hold it up', () => lab.holdUp(), { title: 'U' }), harden),
       h('p.panel-note', {}, 'Freezes the shape the paper holds right now into one solid piece. Hardened paper no longer folds.'),
     ),
     section(

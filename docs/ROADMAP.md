@@ -12,7 +12,7 @@
 ## Next: finish the paper
 
 1. Owner plays the Fold Lab by hand and critiques the feel
-2. Decide how a flat boat opens into a hull, and whether a plane opens by hand
+2. Decide how a flat boat opens into a hull
 3. Pick the final grid size from that playtest
 
 ## Then: mechanics

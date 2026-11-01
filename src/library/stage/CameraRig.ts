@@ -75,6 +75,20 @@ export class CameraRig {
     }
   }
 
+  /** Looks at a point from any direction, for screenshots that match a reference. */
+  aim(target: readonly [number, number, number], azimuth: number, elevation: number): void {
+    this.center.fromArray(target);
+    const a = MathUtils.degToRad(azimuth);
+    const e = MathUtils.degToRad(elevation);
+    this.camera.position
+      .set(Math.sin(a) * Math.cos(e), Math.sin(e), Math.cos(a) * Math.cos(e))
+      .multiplyScalar(this.distance)
+      .add(this.center);
+    this.controls.target.copy(this.center);
+    this.gliding = false;
+    this.controls.update();
+  }
+
   update(dt: number): void {
     if (this.gliding) {
       const k = 1 - Math.exp(-GLIDE_SPEED * dt);

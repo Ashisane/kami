@@ -71,6 +71,9 @@ for floppy paper, where they work very well.
 | Click the pin, or Space | Drop it: crease on the guide |
 | Right click the pin, or Esc | Let go, no crease |
 | Shift + drag | Grip every layer at that point |
+| Ctrl | Reach the underside: the flap below |
+| B | Bend a lifted flap: it stays at that angle |
+| U, or Hold it up | Two hands lift the paper by both ends |
 
 ## How paper keeps from going through itself
 
@@ -101,7 +104,7 @@ A flap is more than one connected piece of paper. A plane's wing is several laye
 tucked over each other, each joined to the body along the same crease. So
 `turningOn` cuts the paper along the crease, keeps what the flap is joined to as
 the part that stays, and swings every other part lying above it. For the plane this
-gives exactly the 62 faces its wing fold moved. Testing height alone hid this for a
+gives exactly the faces its wing fold moved. Testing height alone hid this for a
 while: a pull on the wing raised the whole plane, and the height looked right.
 
 Layers are too thin to tell apart by eye, so hovering lights up the flap first.
@@ -125,14 +128,32 @@ Nested creases share one plane at the fold, so only the outermost rim is drawn.
 
 ## Thickness and stiffness
 
-- **Thickness** is 0.01 m a layer, so a whole plane is about 0.24 m at the nose. It is
-  a look, kept apart from `CONTACT_GAP`, the 0.03 m the solver holds loose sheets
-  apart by. Thin paper would otherwise tunnel through itself.
+- **Thickness** is 0.0034 m a layer, which is a real sheet of A4 scaled to 10 m. A
+  whole plane is about 8 cm at the nose. It is a look, kept apart from `CONTACT_GAP`,
+  the 0.03 m the solver holds loose sheets apart by. Thin paper would otherwise tunnel
+  through itself.
 - **Stiffness** grows with layers squared. A solid beam would be cubed, but folded
   layers slide over each other. Cubed, 22 layers were 10,000 times stiffer than one
   sheet, which read as rubber. A power of 1.5 went too far the other way: a clamped
   strip of 4 layers sagged almost as far as one sheet (8.6 m against 8.8 m). Squared
   it sags 8.3 m, and cubed it sagged 7.2 m.
+
+## Opening wings
+
+A pulled flap wants to shut. Pressing B bends its crease for good at the angle it is
+held, as real paper keeps a bend, and the flap stays when every hand lets go. Several
+flaps can be open at once: `buildSoftMesh` takes them as a list, so two wings on one
+crease stay apart instead of welding together.
+
+A plane lies on one wing, so that wing cannot open against the bench. Hold it up
+first, then Ctrl reaches it. The third pin is free for that, since two hold the body.
+
+A flap has its own surface normals. Shared across a crease, the normals of two
+opposed wings cancel, and the top and bottom of each wing collapse together there.
+
+`SpreadStep` does all this at once, for a recipe: it stands the paper on its keel
+with its wings open and two hands holding it. It is shape only, so the Book is
+unchanged. Folding again shuts every flap, because the Book only knows flat paper.
 
 ## Hardening
 
@@ -158,9 +179,12 @@ mean by "tuck one flap under the other".
 Recipes follow real sources and run one step at a time in the Fold tab.
 
 - **Nakamura plane.** Southwest Adopt-A-Pilot sheet, all folds, cut to 6 by 10 m.
-  The wings crease at x = 1.5 m, so their edges meet the keel. One change: the triangle folds 1 m below its base, because a 45 degree fold puts the
+  One change: the triangle folds 1 m below its base, because a 45 degree fold puts the
   corner exactly on the tip otherwise, leaving no tip to lock with. The classic dart
   cannot be made at all: its second fold is 22.5 degrees.
+- **Dart.** The same plane with its tail cut off through every layer and a 0.5 m keel,
+  so each wing comes to a point, after an owner reference. The wings still sweep at
+  45 degrees and start 0.5 m behind the nose: a true dart needs 22.5 degree lines.
 - **Paper boat.** Nottinghamshire Mayflower sheet, through step 9, cut to 8 by 10 m.
   Steps 10 and 11 are pulling it open by hand.
 
@@ -186,7 +210,5 @@ longer join become separate sheets. A slit stays one piece and stays open.
   paper tucks away. Tucking them first left no workable layer order.
 - **An opening can stall the frame.** The layer search is capped, but it runs on the
   main thread and can take a few seconds.
-- **Bottom layers cannot be grabbed** while paper lies on the ground, because the
-  camera cannot go under it. So a plane's second wing cannot be lifted by hand.
 - **Remembered-side contact** can tangle in principle (Baraff et al.). It only
   matters while paper is loose, and each fold replaces it with the Book's truth.

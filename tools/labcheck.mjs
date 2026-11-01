@@ -66,14 +66,17 @@ async function dropByClick() {
   await page.mouse.click(sx, sy);
 }
 
+/** Runs a recipe up to some number of folds, one step at a time, so its last steps can be left for hands. */
 async function buildRecipe(name, chip, folds) {
   await page.keyboard.press('r');
   await wait(300);
   await page.locator('.chip', { hasText: chip }).click();
   await wait(200);
-  await page.locator('.btn', { hasText: 'Play all' }).click();
-  await page.waitForFunction((n) => window.kami.lab().folds >= n, folds, { timeout: 25000 });
-  await wait(1400);
+  for (let i = 0; i < 40 && (await lab()).folds < folds; i++) {
+    await page.locator('.btn', { hasText: 'Next fold' }).click();
+    await wait(950);
+  }
+  await wait(1000);
   await shot(`${name}-folded`);
   const result = await lab();
   check(`${name}: every fold of the recipe works`, result.folds === folds, `${result.folds} folds, ${result.tallest} layers, ${result.message.slice(0, 40)}`);
@@ -192,9 +195,16 @@ try {
   r = await lab();
   check('hovering the plane lights up the wing on top', r.hoverFaces > 20, `${r.hoverFaces} faces`);
   await shot('plane-hover');
-  await pin(-3.2, 0.6);
-  await pin(-3.2, 4.6);
-  await drag([-2.2, 3], [-2.8, 3], { hold: 1100, lift: 700, midShot: 'plane-wing' });
+  await page.keyboard.down('Control');
+  await page.mouse.move(wx + 3, wy + 2);
+  await wait(450);
+  r = await lab();
+  await page.keyboard.up('Control');
+  await page.mouse.move(wx, wy);
+  check('holding Ctrl lights up the wing underneath', r.hoverFaces > 20, `${r.hoverFaces} faces`);
+  await pin(-2.6, 0.6);
+  await pin(-2.6, 4.6);
+  await drag([-1.4, 3], [-2.4, 3], { hold: 1100, lift: 700, midShot: 'plane-wing' });
   await wait(300);
   r = await lab();
   check('with the body pinned, a wing lifts by hand', r.height > 1 && r.height < 4, `reaches ${r.height.toFixed(1)} m`);
@@ -204,6 +214,83 @@ try {
   r = await lab();
   await shot('plane-wing-released');
   check('and the crease pulls it shut again when let go', r.height < 1.2, `${r.height.toFixed(2)} m`);
+
+  // 7b. Open the wing again and fix it there: real paper keeps a bend.
+  await pin(-2.6, 0.6);
+  await pin(-2.6, 4.6);
+  await drag([-1.4, 3], [-2.4, 3], { hold: 1100, lift: 700 });
+  await wait(300);
+  await page.keyboard.press('b');
+  await wait(1500);
+  r = await lab();
+  await shot('plane-wing-fixed');
+  // The wing is 2 m wide, so upright it stands about that tall.
+  check('B fixes a wing open, and it stays there', r.fixedFlaps === 1 && r.height > 1.2, `${r.fixedFlaps} fixed, ${r.height.toFixed(2)} m`);
+  await page.keyboard.press('Escape');
+  await wait(900);
+  r = await lab();
+  check('and it stays when every hand lets go', r.height > 1.2, `${r.height.toFixed(2)} m`);
+
+  // 7c. Lift the plane, reach under for the second wing, fix it, harden it.
+  await page.locator('.btn', { hasText: 'Hold it up' }).click();
+  await wait(2000);
+  await shot('plane-lifted');
+  r = await lab();
+  check('two hands lift the plane off the bench', r.pins === 2 && r.height > 3, `${r.pins} pins, top ${r.height.toFixed(2)} m`);
+  // Hunt for the wing underneath the way a player does: move until it lights up.
+  await page.keyboard.down('Control');
+  const [cx0, cy0] = await screen(-2.3, 2.6, 2.8);
+  let found = null;
+  for (const [dx, dy] of [[0, 0], [30, 0], [-30, 0], [0, 30], [30, 30], [-30, 30], [60, 20], [0, 60], [60, 60], [90, 40]]) {
+    await page.mouse.move(cx0 + dx, cy0 + dy);
+    await wait(160);
+    if ((await lab()).hoverFaces > 50) {
+      found = [cx0 + dx, cy0 + dy];
+      break;
+    }
+  }
+  check('Ctrl finds the wing underneath while it is held up', found !== null, found ? 'lit up' : 'nothing lit up');
+  await shot('plane-under-hover');
+  await page.mouse.down();
+  await page.mouse.move((found?.[0] ?? cx0) + 40, (found?.[1] ?? cy0) + 70, { steps: 14 });
+  await page.keyboard.up('Control');
+  await wait(1100);
+  await shot('plane-under-wing');
+  await page.mouse.up();
+  await wait(200);
+  r = await lab();
+  check('the second wing lifts from underneath', r.liftedFaces > 200, `${r.liftedFaces} faces lifted`);
+  await page.keyboard.press('b');
+  await wait(800);
+  r = await lab();
+  check('so both wings stay fixed open at once', r.fixedFlaps === 2, `${r.fixedFlaps} fixed`);
+  await shot('plane-both-wings');
+  await page.locator('.btn', { hasText: 'Harden' }).click();
+  await wait(300);
+  await page.keyboard.press('Escape');
+  await wait(1500);
+  r = await lab();
+  check('and it hardens as one solid plane', r.hardened, r.message);
+  await shot('plane-hardened');
+
+  // 7d. The Dart runs its whole recipe, wings and all.
+  await page.keyboard.press('r');
+  await wait(300);
+  await page.locator('.chip', { hasText: 'Dart' }).click();
+  await wait(200);
+  await page.locator('.btn', { hasText: 'Play all' }).click();
+  await page.waitForFunction(() => window.kami.lab().fixedFlaps === 2, undefined, { timeout: 25000 });
+  await wait(1600);
+  r = await lab();
+  check('the Dart ends held up with both wings open', r.pins === 2 && r.height > 2, `${r.pins} pins, top ${r.height.toFixed(2)} m`);
+  await shot('dart-held');
+  await page.locator('.btn', { hasText: 'Harden' }).click();
+  await wait(1200);
+  r = await lab();
+  check('and stays up when hardened in those hands', r.hardened && r.height > 2, `top ${r.height.toFixed(2)} m`);
+  await shot('dart-hardened');
+  await page.locator('.btn', { hasText: 'Soften' }).click();
+  await page.keyboard.press('Escape');
 
   await buildRecipe('boat', 'Paper Boat', 7);
 

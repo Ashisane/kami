@@ -42,6 +42,8 @@ export class SheetView {
   private patchPosition = new Float32Array(0);
   private patchNormal = new Float32Array(0);
   private vertexNormal = new Float32Array(0);
+  /** Which normal each triangle corner reads. A flap has its own, so a crease stays sharp. */
+  private cornerNormal = new Int32Array(0);
 
   // What each drawn vertex is: a patch point, pushed along its normal by a height.
   private drawPatch = new Int32Array(0);
@@ -71,8 +73,9 @@ export class SheetView {
   private computePatches(): void {
     const { soft } = this.piece;
     const { mesh, x } = soft;
-    const { tris, triCount, vertexCount } = mesh;
+    const { tris, triCount } = mesh;
     const normal = this.vertexNormal;
+    const corner = this.cornerNormal;
     normal.fill(0);
     for (let t = 0; t < triCount; t++) {
       const a = (tris[t * 3] as number) * 3, b = (tris[t * 3 + 1] as number) * 3, c = (tris[t * 3 + 2] as number) * 3;
@@ -80,14 +83,14 @@ export class SheetView {
       const vx = (x[c] as number) - (x[a] as number), vy = (x[c + 1] as number) - (x[a + 1] as number), vz = (x[c + 2] as number) - (x[a + 2] as number);
       // Winding faces +y on flat paper, so this normal points to the top of the stack.
       const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
-      for (const i of [a, b, c]) {
+      for (let k = 0; k < 3; k++) {
+        const i = (corner[t * 3 + k] as number) * 3;
         normal[i] = (normal[i] as number) + nx;
         normal[i + 1] = (normal[i + 1] as number) + ny;
         normal[i + 2] = (normal[i + 2] as number) + nz;
       }
     }
-    for (let v = 0; v < vertexCount; v++) {
-      const i = v * 3;
+    for (let i = 0; i < normal.length; i += 3) {
       const length = Math.hypot(normal[i] as number, normal[i + 1] as number, normal[i + 2] as number) || 1;
       normal[i] = (normal[i] as number) / length;
       normal[i + 1] = (normal[i + 1] as number) / length;
@@ -102,9 +105,10 @@ export class SheetView {
       const x0 = x[i0] as number, y0 = x[i0 + 1] as number, z0 = x[i0 + 2] as number;
       const x1 = x[i1] as number, y1 = x[i1 + 1] as number, z1 = x[i1 + 2] as number;
       const x2 = x[i2] as number, y2 = x[i2 + 1] as number, z2 = x[i2 + 2] as number;
-      const n0x = normal[i0] as number, n0y = normal[i0 + 1] as number, n0z = normal[i0 + 2] as number;
-      const n1x = normal[i1] as number, n1y = normal[i1 + 1] as number, n1z = normal[i1 + 2] as number;
-      const n2x = normal[i2] as number, n2y = normal[i2 + 1] as number, n2z = normal[i2 + 2] as number;
+      const c0 = (corner[t * 3] as number) * 3, c1 = (corner[t * 3 + 1] as number) * 3, c2 = (corner[t * 3 + 2] as number) * 3;
+      const n0x = normal[c0] as number, n0y = normal[c0 + 1] as number, n0z = normal[c0 + 2] as number;
+      const n1x = normal[c1] as number, n1y = normal[c1 + 1] as number, n1z = normal[c1 + 2] as number;
+      const n2x = normal[c2] as number, n2y = normal[c2 + 1] as number, n2z = normal[c2 + 2] as number;
       for (let a = DETAIL; a >= 0; a--) {
         const row = DETAIL - a;
         for (let b = 0; b <= row; b++) {
@@ -169,13 +173,24 @@ export class SheetView {
     const { piece } = this;
     const { book, soft } = piece;
     const { mesh: sim } = soft;
-    const { tris, triCount, vertexCount, faceTri, cornerVertex } = sim;
+    const { tris, triCount, vertexCount, faceTri, cornerVertex, triFlap } = sim;
     const thickness = piece.definition.thickness;
     const unit = piece.unit;
 
     this.patchPosition = new Float32Array(triCount * PATCH_POINTS * 3);
     this.patchNormal = new Float32Array(triCount * PATCH_POINTS * 3);
-    this.vertexNormal = new Float32Array(vertexCount * 3);
+    const normalOf = new Map<number, number>();
+    this.cornerNormal = new Int32Array(triCount * 3);
+    for (let i = 0; i < triCount * 3; i++) {
+      const key = (tris[i] as number) + vertexCount * ((triFlap[Math.floor(i / 3)] as number) + 1);
+      let id = normalOf.get(key);
+      if (id === undefined) {
+        id = normalOf.size;
+        normalOf.set(key, id);
+      }
+      this.cornerNormal[i] = id;
+    }
+    this.vertexNormal = new Float32Array(normalOf.size * 3);
 
     // Faces per solver triangle, bottom to top, with swinging faces left out.
     const stacks: number[][] = Array.from({ length: triCount }, () => []);

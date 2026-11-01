@@ -8,7 +8,7 @@ import type { FoldFailure, FoldPlan, Landing } from '@/core/fold/FoldBook';
 import { lineNormal, sideOf, UNITS_PER_CELL } from '@/core/fold/lattice';
 import type { LineKind, MirrorLine } from '@/core/fold/lattice';
 import { foldRequest, RECIPES, toMirrorLine } from '@/core/fold/recipes';
-import type { FoldStep, Recipe, RecipeStep, TrimStep } from '@/core/fold/recipes';
+import type { FoldStep, Recipe, RecipeStep, SpreadStep, TrimStep } from '@/core/fold/recipes';
 import type { ReshapeFailure } from '@/core/fold/reshape';
 import { SheetPiece } from '@/core/fold/SheetPiece';
 import { countCrossings } from '@/core/fold/soft/crossings';
@@ -31,6 +31,8 @@ const SETTLE_STEPS = 30;
 /** Pointer travel, in pixels, that turns a click into a drag. */
 const DRAG_START = 6;
 const DRAG_PLANE_HEIGHT = 0.05;
+/** How high two hands lift a plane off the bench, in metres. */
+const HOLD_UP_HEIGHT = 3.2;
 
 export type LabTool = 'fold' | 'cut';
 
@@ -98,6 +100,8 @@ export interface LabReadout {
   hoverFaces: number;
   /** Faces lifted off their stack right now. */
   liftedFaces: number;
+  /** Flaps fixed open. */
+  fixedFlaps: number;
   /** The pin that would fold if dropped, and whether it would succeed. */
   held: { x: number; y: number; z: number; ready: boolean } | null;
   recipe: { recipe: Recipe; next: number } | null;
@@ -130,6 +134,8 @@ export class FoldLab {
   private readonly history: Snapshot[] = [];
   private log: RecipeStep[] = [];
   private hardened = false;
+  /** True when the sheet starts turned over, for a recipe that wants its printed face outside. */
+  private faceDown = false;
   private simulationMs = 0;
   private message = 'Click paper to pin it, or drag it to pull it over.';
   private recipe: { recipe: Recipe; next: number } | null = null;
@@ -288,6 +294,7 @@ export class FoldLab {
     }
     const hit = this.pick();
     if (!hit) return;
+    if (event.ctrlKey) hit.fromAbove = false;
     const grip = this.grab(hit, event.shiftKey);
     if (grip) this.beginPress(grip, event, true);
   };
@@ -328,7 +335,10 @@ export class FoldLab {
   /** A click only pins the stack. Actually pulling is what lifts a flap away from it. */
   private startCarrying(grip: Grip): void {
     const { piece } = grip.bench;
-    if (!grip.carried && grip.seeds.length === 1 && grip.fromAbove && !this.hardened && piece.lifted.size === 0 && piece.book.depth(grip.face) > 1 && piece.peel(grip.face)) {
+    const lifts = !grip.carried && grip.seeds.length === 1 && !this.hardened && !piece.pulling;
+    if (lifts && piece.unfix(grip.face)) {
+      grip.peeled = true;
+    } else if (lifts && piece.book.depth(grip.face) > 1 && piece.peel(grip.face, !grip.fromAbove)) {
       grip.peeled = true;
       this.regrip(grip.bench);
       for (const f of piece.lifted) (grip.near as Set<number>).add(f);
@@ -386,14 +396,15 @@ export class FoldLab {
     }
     this.ray(event);
     const hit = this.markerUnderPointer() ? null : this.pick();
-    const face = hit?.fromAbove && hit.bench.piece.lifted.size === 0 ? this.faceOn(hit.bench, hit.tri, true) : -1;
+    const fromAbove = (hit?.fromAbove ?? true) && !event.ctrlKey;
+    const face = hit && !hit.bench.piece.pulling ? this.faceOn(hit.bench, hit.tri, fromAbove) : -1;
     if (!hit || face < 0) {
       this.fadeHover();
       return;
     }
     const { hover } = this;
     if (hover?.bench === hit.bench && hover.face === face) return;
-    const flap = hit.bench.piece.flapToLift(face);
+    const flap = hit.bench.piece.flapToLift(face, !fromAbove);
     if (!flap) {
       this.fadeHover();
       return;
@@ -554,6 +565,25 @@ export class FoldLab {
     const failure = assessment?.plan.failure;
     if (failure === 'jammed' || failure === 'layers-cross') this.reportFailure(failure);
     this.letGo(grip);
+  }
+
+  /** Bends a lifted flap for good at the angle it is held, and lets the hand go. */
+  fixFlap(): void {
+    const grips = this.grips.filter((grip) => grip.peeled);
+    const first = grips[0];
+    if (!first) {
+      this.setMessage('Pull a flap open first, then fix it there.');
+      return;
+    }
+    first.bench.piece.fixFlaps();
+    for (const grip of grips) {
+      grip.peeled = false;
+      this.dropGrip(grip);
+    }
+    const { x, y, z } = first.pin;
+    this.scraps.burst(new Vector3(x, y, z), 10, [first.bench.piece.definition.top, first.bench.piece.definition.bottom], 0.5, 0.6);
+    this.shake.add(0.1);
+    this.setMessage('Fixed open. It stays where you left it.');
   }
 
   /** Drops the hand that last pulled paper. */
@@ -722,20 +752,28 @@ export class FoldLab {
     this.clearBenches();
     this.log = snapshot.log;
     if (this.recipe) this.recipe.next = snapshot.recipeNext;
-    this.addBench(new SheetPiece(this.definition, snapshot.book));
+    this.addBench(new SheetPiece(this.dressed(), snapshot.book));
     this.hardened = false;
     this.setMessage('Stepped back.');
   }
 
-  reset(definition = this.definition): void {
+  /** The sheet as it lies on the bench, which may be turned over. */
+  private dressed(): SheetDefinition {
+    const { definition } = this;
+    return this.faceDown ? { ...definition, top: definition.bottom, bottom: definition.top } : definition;
+  }
+
+  reset(definition = this.definition, faceDown = false): void {
     this.definition = definition;
+    this.faceDown = faceDown;
     this.clearBenches();
     this.history.length = 0;
     this.log = [];
     this.recipe = null;
     this.autoplay = false;
     this.hardened = false;
-    this.addBench(new SheetPiece(definition));
+    for (const bench of this.benches) bench.piece.harden(false);
+    this.addBench(new SheetPiece(this.dressed()));
     this.setMessage(`A fresh sheet, ${definition.size / definition.cells} m between fold lines.`);
   }
 
@@ -765,7 +803,7 @@ export class FoldLab {
   /** Lays out a recipe, ready to step through. */
   openRecipe(id: string): void {
     const recipe = this.recipeById(id);
-    this.reset();
+    this.reset(this.definition, recipe.faceDown);
     this.recipe = { recipe, next: 0 };
     this.setMessage(recipe.source);
   }
@@ -792,6 +830,17 @@ export class FoldLab {
       }
       for (const grip of this.grips.filter((g) => g.bench === bench)) this.dropGrip(grip);
       bench.flap.start(new Set(bench.piece.book.faces), before, null);
+    } else if (step.action === 'spread') {
+      const before = bench.piece.corners();
+      for (const grip of this.grips.filter((g) => g.bench === bench)) this.dropGrip(grip);
+      if (!this.spread(bench, step)) {
+        this.history.pop();
+        this.recipe.next--;
+        this.autoplay = false;
+        this.setMessage(`"${step.label}" could not be done.`);
+        return;
+      }
+      bench.flap.start(new Set(bench.piece.book.faces), before, null);
     } else {
       const { piece } = bench;
       const request = foldRequest(piece.book, piece.definition.size, step);
@@ -811,6 +860,48 @@ export class FoldLab {
 
   playAll(): void {
     this.autoplay = true;
+  }
+
+  /** Opens the wings, with two hands on the body holding it up. */
+  private spread(bench: Bench, step: SpreadStep): boolean {
+    if (!bench.piece.spread(step)) return false;
+    this.takeBothEnds(bench);
+    return true;
+  }
+
+  /** Two hands on the paper that is not lifted, as far apart along it as they can get. */
+  private takeBothEnds(bench: Bench): Grip[] {
+    const { piece } = bench;
+    const { mesh } = piece.soft;
+    const { lifted } = piece;
+    let nose = -1, tail = -1, low = Infinity, high = -Infinity;
+    for (const f of piece.book.faces) {
+      if (lifted.has(f)) continue;
+      const t = mesh.faceTri[f] as number;
+      const z = mesh.flat[(mesh.tris[t * 3] as number) * 2 + 1] as number;
+      if (z < low) {
+        low = z;
+        nose = t;
+      }
+      if (z > high) {
+        high = z;
+        tail = t;
+      }
+    }
+    const hit = (tri: number) => ({ bench, tri, b0: 1 / 3, b1: 1 / 3, b2: 1 / 3, fromAbove: true });
+    return [this.grab(hit(nose), true), this.grab(hit(tail), true)].filter((grip) => grip !== null);
+  }
+
+  /** Lifts the paper off the bench by both ends, so whatever is underneath can be reached. */
+  holdUp(): void {
+    const bench = this.benches[0];
+    if (!bench || this.hardened) return;
+    this.letGoAll();
+    for (const grip of this.takeBothEnds(bench)) {
+      grip.pin.y = HOLD_UP_HEIGHT;
+      grip.target.y = HOLD_UP_HEIGHT;
+    }
+    this.setMessage('Held up. Hold Ctrl and pull the flap underneath.');
   }
 
   private trim(bench: Bench, step: TrimStep): void {
@@ -839,6 +930,10 @@ export class FoldLab {
       if (step.action === 'open') {
         const failure = bench.piece.open(step);
         if (failure) throw new Error(`${step.label}: ${failure}`);
+        continue;
+      }
+      if (step.action === 'spread') {
+        if (!this.spread(bench, step)) throw new Error(`${step.label}: no wings to open`);
         continue;
       }
       const { piece } = bench;
@@ -1026,6 +1121,7 @@ export class FoldLab {
       height: this.height(),
       hoverFaces: this.hover?.size ?? 0,
       liftedFaces: this.benches.reduce((sum, b) => sum + b.piece.lifted.size, 0),
+      fixedFlaps: this.benches.reduce((sum, b) => sum + b.piece.fixedFlaps, 0),
       held: active ? { x: active.pin.heldX, y: active.pin.heldY, z: active.pin.heldZ, ready: assessment?.reachable ?? false } : null,
       recipe: this.recipe,
     };

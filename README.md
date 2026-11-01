@@ -19,6 +19,9 @@ Opens the Fold Lab at http://localhost:5173.
 | Right click a pin / Esc | Let go with no crease |
 | Wheel while dragging | Raise or lower |
 | Shift + drag | Grip every layer |
+| Ctrl | Reach the underside: the flap below |
+| B | Bend a lifted flap: it stays at that angle |
+| U | Two hands lift the paper by both ends |
 | N | Next recipe step |
 | X | Cut tool |
 | Z / R | Step back / fresh sheet |
