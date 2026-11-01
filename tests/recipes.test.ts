@@ -38,13 +38,48 @@ describe('recipes', () => {
     expect(book.tallest).toBeGreaterThanOrEqual(6);
   });
 
-  it('makes a hat with a brim on both sides', () => {
-    const hat = RECIPES.find((r) => r.id === 'hat');
-    if (!hat) throw new Error('no hat recipe');
-    const { book } = runRecipe(hat, FoldBook.sheet(20), SIZE);
-    const box = bounds(book);
+  const boatUpTo = (steps: number) => {
+    const boat = RECIPES.find((r) => r.id === 'boat');
+    if (!boat) throw new Error('no boat recipe');
+    return runRecipe({ ...boat, steps: boat.steps.slice(0, steps) }, FoldBook.sheet(20), SIZE).book;
+  };
+  /** Where a point of the flat sheet has ended up, in metres. */
+  const placeOf = (book: FoldBook, x: number, z: number) => {
+    for (const f of book.faces) {
+      for (let k = 0; k < 3; k++) {
+        if (book.rest[f * 6 + k * 2] === x * 12 && book.rest[f * 6 + k * 2 + 1] === z * 12) return [metres(book, f, k, 0), metres(book, f, k, 1)];
+      }
+    }
+    throw new Error('no such point');
+  };
+
+  it('makes the hat of step 5, with a brim on both sides', () => {
+    const box = bounds(boatUpTo(6));
     expect(box.maxX - box.minX).toBeCloseTo(8);
     expect(box.maxZ).toBeCloseTo(9);
     expect(box.minZ).toBeCloseTo(5);
+  });
+
+  it('opens the hat into the square of step 6, brim corners together', () => {
+    const book = boatUpTo(7);
+    const box = bounds(book);
+    expect(box.maxX - box.minX).toBeCloseTo(4);
+    expect(box.maxZ - box.minZ).toBeCloseTo(4);
+    for (const [x, z] of [[0, 1], [8, 1], [0, 9], [8, 9]] as const) expect(placeOf(book, x, z)).toEqual([0, 9]);
+    expect(placeOf(book, 4, 1)).not.toEqual(placeOf(book, 4, 9));
+  });
+
+  it('folds both bottom points up to the top, the triangle of step 8', () => {
+    const book = boatUpTo(9);
+    for (const [x, z] of [[0, 1], [8, 1], [0, 9], [8, 9]] as const) expect(placeOf(book, x, z)).toEqual(placeOf(book, 4, 5));
+  });
+
+  it('opens the triangle into the diamond of step 9, with its seam down the middle', () => {
+    const book = boatUpTo(10);
+    const box = bounds(book);
+    expect(box.maxX - box.minX).toBeCloseTo(4);
+    expect(box.maxZ - box.minZ).toBeCloseTo(4);
+    expect(placeOf(book, 4, 1)).toEqual(placeOf(book, 4, 9));
+    expect(book.violations()).toBe(0);
   });
 });

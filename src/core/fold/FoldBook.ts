@@ -247,6 +247,8 @@ export class FoldBook {
       for (let k = 0; k < CORNERS; k++) {
         const g = this.neighbour[f * CORNERS + k] as number;
         if (g < f || this.edgeBlocked(f, k)) continue;
+        // A layer of -1 means not placed yet, while a reshape searches for an order.
+        if ((this.layer[f] as number) < 0 || (this.layer[g] as number) < 0) continue;
         const i = f * 6;
         const n = (k + 1) % CORNERS;
         const p = `${this.at[i + k * 2]},${this.at[i + k * 2 + 1]}`;

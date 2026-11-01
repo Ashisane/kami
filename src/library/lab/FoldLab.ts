@@ -9,6 +9,7 @@ import { lineNormal, sideOf, UNITS_PER_CELL } from '@/core/fold/lattice';
 import type { LineKind, MirrorLine } from '@/core/fold/lattice';
 import { foldRequest, RECIPES, toMirrorLine } from '@/core/fold/recipes';
 import type { FoldStep, Recipe, RecipeStep, TrimStep } from '@/core/fold/recipes';
+import type { ReshapeFailure } from '@/core/fold/reshape';
 import { SheetPiece } from '@/core/fold/SheetPiece';
 import { countCrossings } from '@/core/fold/soft/crossings';
 import type { Pin } from '@/core/fold/soft/SoftSheet';
@@ -720,6 +721,18 @@ export class FoldLab {
 
     if (step.action === 'trim') {
       this.trim(bench, step);
+    } else if (step.action === 'open') {
+      const before = bench.piece.corners();
+      const failure = bench.piece.open(step);
+      if (failure) {
+        this.history.pop();
+        this.recipe.next--;
+        this.autoplay = false;
+        this.setMessage(`"${step.label}" could not be done: ${OPEN_FAILURE_TEXT[failure]}`);
+        return;
+      }
+      for (const grip of this.grips.filter((g) => g.bench === bench)) this.dropGrip(grip);
+      bench.flap.start(new Set(bench.piece.book.faces), before, null);
     } else {
       const { piece } = bench;
       const request = foldRequest(piece.book, piece.definition.size, step);
@@ -762,6 +775,11 @@ export class FoldLab {
       recipe.next++;
       if (step.action === 'trim') {
         this.trim(bench, step);
+        continue;
+      }
+      if (step.action === 'open') {
+        const failure = bench.piece.open(step);
+        if (failure) throw new Error(`${step.label}: ${failure}`);
         continue;
       }
       const { piece } = bench;
@@ -951,6 +969,11 @@ export class FoldLab {
 }
 
 const LINE_NAMES: Record<LineKind, string> = { x: 'straight', z: 'straight', sum: 'diagonal', diff: 'diagonal' };
+
+const OPEN_FAILURE_TEXT: Record<ReshapeFailure, string> = {
+  'cannot-lie-flat': 'those creases cannot lie flat.',
+  'no-layer-order': 'no layer order works.',
+};
 
 const FAILURE_TEXT: Record<FoldFailure, string> = {
   'not-a-grid-line': 'That is not on the grid.',

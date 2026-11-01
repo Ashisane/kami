@@ -1,6 +1,8 @@
 import type { FoldBook, FoldPlan, Landing } from './FoldBook';
 import { UNITS_PER_CELL } from './lattice';
 import type { LineKind, MirrorLine } from './lattice';
+import { reshape } from './reshape';
+import type { ReshapeFailure } from './reshape';
 
 /**
  * Folds written down, so a design can be replayed exactly. This is also what a
@@ -21,6 +23,8 @@ export interface FoldStep {
   grip: 'all' | 'top' | 'bottom';
   /** Grips one spot on that outer layer, rather than everything on the moving side. */
   hold?: [number, number];
+  /** How many layers to pinch at that spot, counted in from the outside. */
+  depth?: number;
   /** Grips every layer that started on this part of the flat sheet, like one half of a plane. */
   from?: { axis: 'x' | 'z'; min?: number; max?: number };
   landing?: Landing;
@@ -36,7 +40,19 @@ export interface TrimStep {
   to: number;
 }
 
-export type RecipeStep = FoldStep | TrimStep;
+/**
+ * Opens a pocket and flattens it a new way: creases open and form all at once.
+ * Lines are in metres on the flat sheet, not as the paper lies now.
+ */
+export interface OpenStep {
+  action: 'open';
+  label: string;
+  changes: { kind: LineKind; at: number; crease: boolean }[];
+  /** Folds this has to leave possible, which picks the right layer order. */
+  ready?: FoldStep[];
+}
+
+export type RecipeStep = FoldStep | TrimStep | OpenStep;
 
 export interface Recipe {
   id: string;
@@ -88,7 +104,10 @@ export function gripFaces(book: FoldBook, size: number, step: FoldStep): number[
         best = f;
       }
     }
-    return best < 0 ? [] : [best];
+    if (best < 0) return [];
+    const stack = book.stackOf(best);
+    const depth = step.depth ?? 1;
+    return step.grip === 'top' ? stack.slice(stack.length - depth) : stack.slice(0, depth);
   }
   return book.faces.filter((f) => outer(f) && book.plan({ line, side: step.side, seeds: [f] }).moved.size > 0);
 }
@@ -102,6 +121,18 @@ export function applyFold(book: FoldBook, size: number, step: FoldStep): FoldPla
   return book.fold(foldRequest(book, size, step));
 }
 
+/** Runs an opening on the Book alone. */
+export function applyOpen(book: FoldBook, size: number, step: OpenStep): ReshapeFailure | null {
+  const scale = unitsPerMetre(book, size);
+  const changes = step.changes.map(({ kind, at, crease }) => ({ kind, c: Math.round(at * scale), crease }));
+  return reshape(book, changes, (candidate) => {
+    for (const next of step.ready ?? []) {
+      if (applyFold(candidate, size, next).failure) return false;
+    }
+    return true;
+  });
+}
+
 /** Runs a whole recipe on the Book alone, and reports the first step that failed. */
 export function runRecipe(recipe: Recipe, start: FoldBook, size: number): { book: FoldBook; failure: string | null } {
   let book = start;
@@ -110,6 +141,11 @@ export function runRecipe(recipe: Recipe, start: FoldBook, size: number): { book
       const scale = unitsPerMetre(book, size);
       const pieces = book.cutAlong({ kind: step.kind, c: Math.round(step.at * scale) }, step.from * scale, step.to * scale);
       book = pieces.reduce((largest, piece) => (piece.faces.length > largest.faces.length ? piece : largest));
+      continue;
+    }
+    if (step.action === 'open') {
+      const failed = applyOpen(book, size, step);
+      if (failed) return { book, failure: `${step.label}: ${failed}` };
       continue;
     }
     const plan = applyFold(book, size, step);
@@ -121,6 +157,11 @@ export function runRecipe(recipe: Recipe, start: FoldBook, size: number): { book
 const fold = (label: string, kind: LineKind, at: number, side: number, grip: FoldStep['grip'], extra: Partial<FoldStep> = {}): FoldStep => ({
   action: 'fold', label, kind, at, side, grip, ...extra,
 });
+
+const open = (label: string, changes: OpenStep['changes'], ready?: FoldStep[]): OpenStep => ({ action: 'open', label, changes, ready });
+
+const boatFront = fold('Fold the front bottom point up', 'diff', -5, -1, 'top', { hold: [0.6, 8.4], depth: 4 });
+const boatBack = fold('Fold the back bottom point up', 'diff', -5, -1, 'bottom', { hold: [0.6, 8.4], depth: 4, landing: { kind: 'under' } });
 
 /** Real planes and boats start from a page, taller than it is wide. */
 const trim = (width: number): TrimStep => ({ action: 'trim', label: `Cut the sheet down to ${width} by 10 m`, kind: 'x', at: width, from: 0, to: 10 });
@@ -177,10 +218,10 @@ export const RECIPES: readonly Recipe[] = [
     ],
   },
   {
-    id: 'hat',
-    name: 'Boat: the hat',
-    source: 'Traditional paper boat, after the Nottinghamshire Mayflower sheet, steps 1 to 4',
-    finish: 'A flat hat. The real boat continues by opening this pocket and flattening it, which is not a simple fold.',
+    id: 'boat',
+    name: 'Paper boat',
+    source: 'Traditional paper boat, after the Nottinghamshire Mayflower sheet',
+    finish: 'A flat diamond, step 9 on the sheet. Pull its side tips apart by hand to open the boat.',
     steps: [
       trim(8),
       fold('Fold the top half down', 'z', 5, -1, 'all'),
@@ -188,6 +229,10 @@ export const RECIPES: readonly Recipe[] = [
       fold('Right corner to the middle, leaving a brim', 'diff', -1, 1, 'all'),
       fold('Fold the front brim up', 'z', 9, 1, 'top'),
       fold('Fold the back brim up', 'z', 9, 1, 'bottom', { landing: { kind: 'under' } }),
+      open('Open the hat and flatten it into a square', [{ kind: 'diff', at: -1, crease: false }, { kind: 'x', at: 4, crease: true }], [boatFront, boatBack]),
+      boatFront,
+      boatBack,
+      open('Open the triangle and flatten it into a square', [{ kind: 'diff', at: -1, crease: true }, { kind: 'z', at: 5, crease: false }]),
     ],
   },
 ];

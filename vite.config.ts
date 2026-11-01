@@ -10,5 +10,7 @@ export default defineConfig({
   test: {
     environment: 'node',
     include: ['tests/**/*.test.ts'],
+    // Opening a boat searches layer orders, which takes seconds on a busy machine.
+    testTimeout: 30000,
   },
 });

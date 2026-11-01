@@ -1,6 +1,9 @@
 import type { SheetDefinition } from '../asset/sheetTypes';
 import { FoldBook } from './FoldBook';
 import type { FoldPlan, FoldRequest } from './FoldBook';
+import { applyOpen } from './recipes';
+import type { OpenStep } from './recipes';
+import type { ReshapeFailure } from './reshape';
 import { reflectX, reflectZ, sideOf } from './lattice';
 import type { MirrorLine } from './lattice';
 import { extractRotation, rotateInto } from './soft/rotation';
@@ -127,6 +130,24 @@ export class SheetPiece {
       return out;
     });
     return plan;
+  }
+
+  /** Opens a pocket and flattens it a new way. The whole piece moves, so all of it lands afresh. */
+  open(step: OpenStep): ReshapeFailure | null {
+    const frame = this.frameOf(new Set());
+    const failure = applyOpen(this.book, this.definition.size, step);
+    if (failure) return failure;
+    this.peeled = new Set();
+    this.rebuild((mesh) => {
+      const out = new Float64Array(mesh.vertexCount * 3);
+      const landing = new Float64Array(3);
+      for (let v = 0; v < mesh.vertexCount; v++) {
+        frame(mesh.flat[v * 2] as number, mesh.flat[v * 2 + 1] as number, landing);
+        out.set(landing, v * 3);
+      }
+      return out;
+    });
+    return null;
   }
 
   /**

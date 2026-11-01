@@ -57,7 +57,7 @@ const BEND_LIMIT = 0.85;
 /** Fastest a hand can drag paper, in metres per second. Faster and layers tunnel. */
 const HAND_SPEED = 7;
 /** Substeps between contact searches. */
-const CONTACT_INTERVAL = 4;
+const CONTACT_INTERVAL = 6;
 /** Bending stiffness of a stack grows with the cube of its thickness, as a real beam's does. */
 const STACK_STIFFENING = 3;
 const PIN_STRENGTH = 0.7;

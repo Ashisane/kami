@@ -13,10 +13,12 @@ Opens the Fold Lab at http://localhost:5173.
 | In the Fold Lab | Action |
 | --- | --- |
 | Click paper | Pin it in place (three pins) |
-| Drag paper over, let go | Fold it |
-| Wheel up while dragging | Lift it, so it stays held when you let go |
+| Drag paper | Pull it over. It stays held |
+| Click the pin, or Space | Drop it: crease on the guide |
+| Right click a pin / Esc | Let go with no crease |
+| Wheel while dragging | Raise or lower |
 | Shift + drag | Grip every layer |
-| Right click a pin / Esc | Remove a pin / all pins |
+| N | Next recipe step |
 | X | Cut tool |
 | Z / R | Step back / fresh sheet |
 

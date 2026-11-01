@@ -198,7 +198,7 @@ try {
   await shot('plane-wing-released');
   check('and the crease pulls it shut again when let go', r.height < 1.2, `${r.height.toFixed(2)} m`);
 
-  await buildRecipe('hat', 'Boat: The Hat', 5);
+  await buildRecipe('boat', 'Paper Boat', 7);
 
   // 8. The finer grid, on the real machine.
   await page.keyboard.press('Escape');
