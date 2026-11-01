@@ -7,9 +7,10 @@ import { FoldBook } from '@/core/fold/FoldBook';
 import type { FoldFailure, FoldPlan, Landing } from '@/core/fold/FoldBook';
 import { lineNormal, sideOf, UNITS_PER_CELL } from '@/core/fold/lattice';
 import type { LineKind, MirrorLine } from '@/core/fold/lattice';
-import { applyStep, gripFaces, RECIPES, toMirrorLine } from '@/core/fold/recipes';
-import type { FoldStep } from '@/core/fold/recipes';
+import { foldRequest, RECIPES, toMirrorLine } from '@/core/fold/recipes';
+import type { FoldStep, Recipe, RecipeStep, TrimStep } from '@/core/fold/recipes';
 import { SheetPiece } from '@/core/fold/SheetPiece';
+import { countCrossings } from '@/core/fold/soft/crossings';
 import type { Pin } from '@/core/fold/soft/SoftSheet';
 import type { ScrapBurst } from '@/core/fx/ScrapBurst';
 import type { Shake } from '@/core/fx/Shake';
@@ -19,19 +20,20 @@ import { FixedStep } from '@/core/sim/FixedStep';
 import { FoldGhost, PIN_COLOURS, PinMarker } from './LabMarkers';
 
 const MAX_PINS = 3;
-/** How close the held point must get to its landing for a release to crease. */
+/** How close the held point must be to its landing for a drop to crease. */
 const SNAP_RADIUS = 1.5;
-/** Lifting a held point this far by wheel means "hold it up", not "fold it". */
-const HOLD_LIFT = 0.6;
 /** Fraction of the sheet's size around a grab that is not trusted as "staying put". */
 const NEAR_GRAB = 0.42;
 const FOLLOW_RATE = 16;
 const MARKER_PICK_RADIUS = 0.42;
 const SETTLE_STEPS = 30;
+/** Pointer travel, in pixels, that turns a click into a drag. */
+const DRAG_START = 6;
+const DRAG_PLANE_HEIGHT = 0.05;
 
 export type LabTool = 'fold' | 'cut';
 
-/** One sheet of the paper on the bench, with its picture. */
+/** One sheet of paper on the bench, with its picture. */
 interface Bench {
   piece: SheetPiece;
   view: SheetView;
@@ -51,11 +53,28 @@ interface Grip {
   near: ReadonlySet<number>;
   /** Where the hand is trying to be. */
   target: Vector3;
+  /** Extra height from the wheel. */
+  lift: number;
+  /** True once the hand has pulled paper somewhere, so dropping it may fold. */
+  carried: boolean;
+  /** True if this grip lifted a flap off its stack. */
+  peeled: boolean;
+  /** Grabbed from above, so pulling it should lift the top flap. */
+  fromAbove: boolean;
+}
+
+/** What dropping a held point would do. */
+interface Assessment {
+  guess: FoldGuess;
+  plan: FoldPlan;
+  landing: Landing;
+  reachable: boolean;
 }
 
 interface Snapshot {
   book: FoldBook;
-  log: FoldStep[];
+  log: RecipeStep[];
+  recipeNext: number;
 }
 
 export interface LabReadout {
@@ -68,11 +87,15 @@ export interface LabReadout {
   triangles: number;
   stretch: number;
   message: string;
-  log: readonly FoldStep[];
-  rigidity: number;
+  log: readonly RecipeStep[];
+  hardened: boolean;
   cellMetres: number;
+  floppiness: number;
   /** How far the paper rises off the ground, in metres. */
   height: number;
+  /** The pin that would fold if dropped, and whether it would succeed. */
+  held: { x: number; y: number; z: number; ready: boolean } | null;
+  recipe: { recipe: Recipe; next: number } | null;
 }
 
 export class FoldLab {
@@ -80,26 +103,29 @@ export class FoldLab {
   private benches: Bench[] = [];
   private grips: Grip[] = [];
   private dragging: Grip | null = null;
-  private liftExtra = 0;
+  /** The last hand to pull paper. Its guide stays up until it is dropped. */
+  private active: Grip | null = null;
+  private press: { grip: Grip; x: number; y: number; moved: boolean; planted: boolean } | null = null;
   private cutFrom: { bench: Bench; flat: { x: number; z: number } } | null = null;
   private cutTo: { x: number; z: number } | null = null;
 
-  private guess: FoldGuess | null = null;
-  private plan: FoldPlan | null = null;
+  private assessment: Assessment | null = null;
   private planKey = '';
+  private cachedPlan: FoldPlan | null = null;
   private moving: ReadonlySet<number> | null = null;
 
   private readonly clock = new FixedStep();
   private readonly ghost: FoldGhost;
   private readonly raycaster = new Raycaster();
   private readonly pointer = new Vector2();
-  private readonly dragPlane = new Plane();
+  private readonly dragPlane = new Plane(new Vector3(0, 1, 0), -DRAG_PLANE_HEIGHT);
   private readonly history: Snapshot[] = [];
-  private log: FoldStep[] = [];
-  private rigidity = 0;
+  private log: RecipeStep[] = [];
+  private hardened = false;
   private simulationMs = 0;
-  private message = 'Drag any point of the paper.';
-  private queue: FoldStep[] = [];
+  private message = 'Click paper to pin it, or drag it to pull it over.';
+  private recipe: { recipe: Recipe; next: number } | null = null;
+  private autoplay = false;
   private listeners = new Set<() => void>();
   tool: LabTool = 'fold';
   /** Runs nothing by itself, for repeatable screenshots. */
@@ -142,15 +168,18 @@ export class FoldLab {
     return bench;
   }
 
+  private removeBench(bench: Bench): void {
+    for (const grip of this.grips.filter((g) => g.bench === bench)) this.dropGrip(grip);
+    bench.flap.clear();
+    bench.view.dispose();
+    this.benches = this.benches.filter((b) => b !== bench);
+  }
+
   private clearBenches(): void {
-    for (const grip of this.grips) grip.marker.dispose();
-    this.grips = [];
+    for (const bench of [...this.benches]) this.removeBench(bench);
     this.dragging = null;
-    for (const bench of this.benches) {
-      bench.flap.clear();
-      bench.view.dispose();
-    }
-    this.benches = [];
+    this.active = null;
+    this.ghost.hide();
   }
 
   dispose(): void {
@@ -184,7 +213,7 @@ export class FoldLab {
   }
 
   /** The nearest paper under the pointer. */
-  private pick(): { bench: Bench; tri: number; b0: number; b1: number; b2: number; fromAbove: boolean; point: Vector3 } | null {
+  private pick(): { bench: Bench; tri: number; b0: number; b1: number; b2: number; fromAbove: boolean } | null {
     const { origin, direction } = this.raycaster.ray;
     const hit = new Vector3();
     const a = new Vector3(), b = new Vector3(), c = new Vector3(), e1 = new Vector3(), e2 = new Vector3(), n = new Vector3();
@@ -212,7 +241,7 @@ export class FoldLab {
         const v = (d11 * d20 - d01 * d21) / det, w = (d00 * d21 - d01 * d20) / det;
         if (v < 0 || w < 0 || v + w > 1) continue;
         best = distance;
-        result = { bench, tri: t, b0: 1 - v - w, b1: v, b2: w, fromAbove: facing < 0, point: new Vector3().copy(origin).addScaledVector(direction, distance) };
+        result = { bench, tri: t, b0: 1 - v - w, b1: v, b2: w, fromAbove: facing < 0 };
       }
     }
     return result;
@@ -242,35 +271,35 @@ export class FoldLab {
 
     const held = this.markerUnderPointer();
     if (held) {
-      this.beginDrag(held);
+      this.beginPress(held, event, false);
       return;
     }
     const hit = this.pick();
     if (!hit) return;
     const grip = this.grab(hit, event.shiftKey);
-    if (grip) this.beginDrag(grip);
+    if (grip) this.beginPress(grip, event, true);
   };
 
-  private beginDrag(grip: Grip): void {
+  private beginPress(grip: Grip, event: PointerEvent, planted: boolean): void {
     this.dragging = grip;
-    this.liftExtra = 0;
+    this.press = { grip, x: event.clientX, y: event.clientY, moved: false, planted };
     this.setOrbit(false);
-    this.dragPlane.set(new Vector3(0, 1, 0), -grip.pin.y);
-    this.guess = null;
-    this.plan = null;
-    this.planKey = '';
-    this.moving = null;
   }
 
   private readonly onMove = (event: PointerEvent): void => {
     if (this.tool === 'cut' && this.cutFrom) {
       this.ray(event);
-      const point = this.raycaster.ray.intersectPlane(new Plane(new Vector3(0, 1, 0), -0.05), new Vector3());
+      const point = this.raycaster.ray.intersectPlane(this.dragPlane, new Vector3());
       if (point) this.cutTo = { x: point.x, z: point.z };
       return;
     }
     const grip = this.dragging;
-    if (!grip) return;
+    if (!grip || !this.press) return;
+    if (!this.press.moved) {
+      if (Math.hypot(event.clientX - this.press.x, event.clientY - this.press.y) < DRAG_START) return;
+      this.press.moved = true;
+      this.startCarrying(grip);
+    }
     this.ray(event);
     const point = this.raycaster.ray.intersectPlane(this.dragPlane, new Vector3());
     if (!point) return;
@@ -278,22 +307,38 @@ export class FoldLab {
     grip.target.z = point.z;
     // Paper is carried up and over: the further it travels, the higher the arc.
     const travelled = Math.hypot(point.x - grip.flat.x, point.z - grip.flat.z);
-    grip.target.y = Math.max(0.25, Math.min(2.8, 0.25 + travelled * 0.34)) + this.liftExtra;
+    grip.target.y = Math.max(0.25, Math.min(2.8, 0.25 + travelled * 0.34)) + grip.lift;
   };
+
+  /** A click only pins the stack. Actually pulling is what lifts a flap away from it. */
+  private startCarrying(grip: Grip): void {
+    const { piece } = grip.bench;
+    if (!grip.carried && grip.seeds.length === 1 && grip.fromAbove && !this.hardened && piece.lifted.size === 0 && piece.book.depth(grip.face) > 1 && piece.peel(grip.face)) {
+      grip.peeled = true;
+      this.regrip(grip.bench);
+      for (const f of piece.lifted) (grip.near as Set<number>).add(f);
+    }
+    grip.carried = true;
+    this.active = grip;
+    this.assessment = null;
+    this.planKey = '';
+    this.moving = null;
+  }
 
   private readonly onWheel = (event: WheelEvent): void => {
     if (!this.dragging) return;
     event.preventDefault();
     event.stopImmediatePropagation();
-    this.liftExtra = Math.max(-1, Math.min(6, this.liftExtra - event.deltaY * 0.0025));
-    this.dragging.target.y += -event.deltaY * 0.0025;
+    const change = -event.deltaY * 0.0025;
+    this.dragging.lift = Math.max(-1, Math.min(6, this.dragging.lift + change));
+    this.dragging.target.y = Math.max(0.1, this.dragging.target.y + change);
   };
 
   private readonly onContext = (event: Event): void => {
     event.preventDefault();
     this.ray(event as PointerEvent);
     const grip = this.markerUnderPointer();
-    if (grip) this.release(grip);
+    if (grip) this.letGo(grip);
   };
 
   private readonly onUp = (): void => {
@@ -302,26 +347,19 @@ export class FoldLab {
       return;
     }
     const grip = this.dragging;
-    if (!grip) return;
+    const press = this.press;
     this.dragging = null;
+    this.press = null;
     this.setOrbit(true);
-    this.ghost.hide();
-    const { guess, plan } = this;
-    this.guess = null;
-    this.plan = null;
+    if (!grip || !press) return;
 
-    if (this.liftExtra < HOLD_LIFT && guess && plan && !plan.failure && guess.miss < SNAP_RADIUS) {
-      this.commit(grip, guess);
+    // A click on a pin that was already there means "put it down".
+    if (!press.moved && !press.planted) {
+      this.drop(grip);
       return;
     }
-    if (this.liftExtra < HOLD_LIFT && (plan?.failure === 'jammed' || plan?.failure === 'layers-cross')) {
-      this.shake.add(0.3);
-      this.setMessage('Jammed: another layer is pinning that paper down.');
-    }
-    // Nothing creased, so the hand stays where it is, holding the paper.
-    grip.bench.piece.settle();
-    this.regrip(grip.bench);
-    this.notify();
+    if (press.moved) this.setMessage('Holding. Click the pin to drop it and crease, or right click to let it fall.');
+    else this.setMessage('Pinned.');
   };
 
   // ---- Holding paper ----
@@ -356,11 +394,10 @@ export class FoldLab {
     const face = this.faceOn(bench, tri, hit.fromAbove);
     if (face < 0) return null;
     const flat = this.flatPoint(bench, tri, b0, b1, b2);
-    if (this.grips.length >= MAX_PINS) this.release(this.grips[0] as Grip);
+    if (this.grips.length >= MAX_PINS) this.letGo(this.grips[0] as Grip);
 
     const stack = piece.book.stackOf(face);
     const seeds = wholeStack ? [...stack] : [face];
-    if (!wholeStack && this.rigidity === 0 && stack.length > 1 && hit.fromAbove && piece.peel(face)) this.regrip(bench);
 
     const mesh = piece.soft.mesh;
     const liveTri = mesh.faceTri[face] as number;
@@ -379,7 +416,7 @@ export class FoldLab {
       const cz = piece.toMetres(((piece.book.at[i + 1] as number) + (piece.book.at[i + 3] as number) + (piece.book.at[i + 5] as number)) / 3);
       if (Math.hypot(cx - flat.x, cz - flat.z) < reach) near.add(f);
     }
-    const grip: Grip = { slot, bench, pin, marker, face, flat, seeds, near, target: new Vector3(pin.x, pin.y, pin.z) };
+    const grip: Grip = { slot, bench, pin, marker, face, flat, seeds, near, target: new Vector3(pin.x, pin.y, pin.z), lift: 0, carried: false, peeled: false, fromAbove: hit.fromAbove };
     this.grips.push(grip);
     this.notify();
     return grip;
@@ -402,9 +439,11 @@ export class FoldLab {
   private regrip(bench: Bench): void {
     const { soft, book } = bench.piece;
     for (const grip of this.grips) {
-      if (grip.bench !== bench) continue;
-      if (!book.faces.includes(grip.face)) continue;
-      const tri = soft.mesh.faceTri[grip.face] as number;
+      if (grip.bench !== bench || !book.faces.includes(grip.face)) continue;
+      // An anchor stays on the stack when a flap lifts off from under its hand.
+      const anchored = !grip.peeled && bench.piece.lifted.has(grip.face);
+      const face = anchored ? (book.stackOf(grip.face).find((f) => !bench.piece.lifted.has(f)) ?? grip.face) : grip.face;
+      const tri = soft.mesh.faceTri[face] as number;
       const [b0, b1, b2] = this.barycentric(bench, tri, grip.flat);
       const held = grip.pin;
       soft.removePin(held);
@@ -415,16 +454,51 @@ export class FoldLab {
     }
   }
 
-  private release(grip: Grip): void {
+  private dropGrip(grip: Grip): void {
     grip.bench.piece.soft.removePin(grip.pin);
     grip.marker.dispose();
     this.grips = this.grips.filter((g) => g !== grip);
     if (this.dragging === grip) this.dragging = null;
+    if (this.active === grip) {
+      this.active = null;
+      this.assessment = null;
+      this.ghost.hide();
+    }
+  }
+
+  /** Lets paper fall with no crease. */
+  private letGo(grip: Grip): void {
+    const { bench, peeled } = grip;
+    this.dropGrip(grip);
+    if (peeled && !this.grips.some((g) => g.bench === bench && g.peeled)) {
+      bench.piece.settle();
+      this.regrip(bench);
+    }
     this.notify();
   }
 
-  releaseAll(): void {
-    for (const grip of [...this.grips]) this.release(grip);
+  letGoAll(): void {
+    for (const grip of [...this.grips]) this.letGo(grip);
+  }
+
+  /**
+   * Puts a held point down. This is the one action that creases paper: pulling
+   * and holding never fold anything, so a fold always means someone chose it.
+   */
+  drop(grip: Grip): void {
+    const assessment = grip.carried && !this.hardened ? this.assess(grip) : null;
+    if (assessment?.reachable) {
+      this.commit(grip, assessment);
+      return;
+    }
+    const failure = assessment?.plan.failure;
+    if (failure === 'jammed' || failure === 'layers-cross') this.reportFailure(failure);
+    this.letGo(grip);
+  }
+
+  /** Drops the hand that last pulled paper. */
+  dropHeld(): void {
+    if (this.active && !this.flapsBusy()) this.drop(this.active);
   }
 
   private flapsBusy(): boolean {
@@ -433,44 +507,24 @@ export class FoldLab {
 
   // ---- Folding ----
 
-  /** Works out what the current drag would do, and shows it. */
-  private updateGuess(dt: number): void {
-    const grip = this.dragging;
-    if (!grip) return;
-    // Hardened paper no longer folds, and paper held up is not trying to.
-    if (this.liftExtra >= HOLD_LIFT || this.rigidity > 0) {
-      this.guess = null;
-      this.ghost.hide();
-      return;
-    }
+  /** Works out what dropping a held point would do. */
+  private assess(grip: Grip): Assessment | null {
     const { piece } = grip.bench;
-    const still = this.moving ?? grip.near;
     // The fold follows the hand, not the paper trailing behind it, so what you
     // aim at is what you get, however slow the frame was.
-    const flatNow = piece.worldToFlat(grip.target, still);
-    this.guess = guessFold(piece, grip.flat, flatNow);
-    const guess = this.guess;
-    if (!guess) {
-      this.ghost.hide();
-      return;
-    }
+    const flatNow = piece.worldToFlat(grip.target, this.moving ?? grip.near);
+    const guess = guessFold(piece, grip.flat, flatNow);
+    if (!guess) return null;
 
     const landing = this.landingFor(flatNow.height);
-    const key = `${guess.line.kind}:${guess.line.c}:${guess.side}:${landing.kind}`;
-    if (key !== this.planKey) {
+    const key = `${grip.slot}:${guess.line.kind}:${guess.line.c}:${guess.side}:${landing.kind}`;
+    if (key !== this.planKey || !this.cachedPlan) {
       this.planKey = key;
-      this.plan = piece.book.plan({ line: guess.line, side: guess.side, seeds: grip.seeds, landing });
+      this.cachedPlan = piece.book.plan({ line: guess.line, side: guess.side, seeds: grip.seeds, landing });
       this.moving = this.paperOnSide(piece, guess);
     }
-    const frame = piece.frameOf(this.moving ?? still);
-    const [from, to] = lineAcrossSheet(piece, guess.line);
-    const toWorld = (p: { x: number; z: number }) => {
-      const out = new Float64Array(3);
-      frame(p.x, p.z, out);
-      return new Vector3().fromArray(out);
-    };
-    const reachable = !this.plan?.failure && guess.miss < SNAP_RADIUS;
-    this.ghost.show(toWorld(from), toWorld(to), toWorld(guess.target), reachable ? 'good' : 'bad', dt);
+    const plan = this.cachedPlan;
+    return { guess, plan, landing, reachable: !plan.failure && guess.miss < SNAP_RADIUS };
   }
 
   /** All paper past the fold line. It is in motion, so it cannot locate the sheet. */
@@ -490,29 +544,62 @@ export class FoldLab {
     return height < -0.2 ? { kind: 'under' } : { kind: 'over' };
   }
 
-  private commit(grip: Grip, guess: FoldGuess): void {
-    const { bench, seeds } = grip;
-    const { piece } = bench;
-    this.release(grip);
-    this.remember();
-    const step = this.stepFor(piece, guess, seeds);
-    const plan = this.foldBench(bench, step.landing ?? { kind: 'over' }, guess.line, guess.side, seeds, false);
-    if (plan.failure) {
-      this.history.pop();
-      this.reportFailure(plan.failure);
+  private updateGuide(dt: number): void {
+    const grip = this.active;
+    if (!grip || this.hardened) {
+      this.showNextRecipeLine(dt);
       return;
     }
-    this.log = [...this.log, step];
-    this.setMessage(`Folded along a ${LINE_NAMES[guess.line.kind]} line. ${piece.book.tallest} layers at the thickest.`);
+    this.assessment = this.assess(grip);
+    const assessment = this.assessment;
+    grip.marker.setReady(assessment?.reachable ?? false);
+    if (!assessment) {
+      this.ghost.hide();
+      return;
+    }
+    const { piece } = grip.bench;
+    const frame = piece.frameOf(this.moving ?? grip.near);
+    const [from, to] = lineAcrossSheet(piece, assessment.guess.line);
+    const toWorld = (p: { x: number; z: number }) => {
+      const out = new Float64Array(3);
+      frame(p.x, p.z, out);
+      return new Vector3().fromArray(out);
+    };
+    this.ghost.show(toWorld(from), toWorld(to), toWorld(assessment.guess.target), assessment.reachable ? 'good' : 'bad', dt);
   }
 
-  private stepFor(piece: SheetPiece, guess: FoldGuess, seeds: readonly number[]): FoldStep {
-    const metres = (guess.line.c * piece.definition.size) / (piece.book.cells * UNITS_PER_CELL);
-    return { kind: guess.line.kind, at: metres, side: guess.side, grip: seeds.length === 1 ? 'top' : 'all', landing: this.planLanding() };
+  /** With a recipe open, the guide marks where the next fold goes. */
+  private showNextRecipeLine(dt: number): void {
+    const step = this.recipe?.recipe.steps[this.recipe.next];
+    const bench = this.benches[0];
+    if (!step || step.action !== 'fold' || !bench || this.flapsBusy()) {
+      this.ghost.hide();
+      return;
+    }
+    const { piece } = bench;
+    const [from, to] = lineAcrossSheet(piece, toMirrorLine(piece.book, piece.definition.size, step));
+    this.ghost.show(new Vector3(from.x, 0.08, from.z), new Vector3(to.x, 0.08, to.z), null, 'good', dt);
   }
 
-  private planLanding(): Landing {
-    return this.plan?.request.landing ?? { kind: 'over' };
+  private commit(grip: Grip, { guess, plan, landing }: Assessment): void {
+    const { bench, seeds } = grip;
+    const { piece } = bench;
+    this.dropGrip(grip);
+    this.remember();
+    const done = this.foldBench(bench, landing, guess.line, guess.side, seeds, false);
+    if (done.failure) {
+      this.history.pop();
+      this.reportFailure(done.failure);
+      return;
+    }
+    void plan;
+    this.log = [...this.log, this.stepFor(piece, guess, seeds, landing)];
+    this.setMessage(`Creased along a ${LINE_NAMES[guess.line.kind]} line. ${piece.book.tallest} layers at the thickest.`);
+  }
+
+  private stepFor(piece: SheetPiece, guess: FoldGuess, seeds: readonly number[], landing: Landing): FoldStep {
+    const at = (guess.line.c * piece.definition.size) / (piece.book.cells * UNITS_PER_CELL);
+    return { action: 'fold', label: 'By hand', kind: guess.line.kind, at, side: guess.side, grip: seeds.length === 1 ? 'top' : 'all', landing };
   }
 
   private foldBench(bench: Bench, landing: Landing, line: MirrorLine, side: number, seeds: readonly number[], swing: boolean): FoldPlan {
@@ -524,8 +611,9 @@ export class FoldLab {
     if (plan.failure) return plan;
     bench.flap.start(plan.moved, before, axis);
     bench.view.update(bench.flap.hidden);
+    for (const grip of this.grips.filter((g) => g.bench === bench)) grip.peeled = false;
     for (const grip of [...this.grips]) {
-      if (grip.bench === bench && plan.moved.has(grip.face)) this.release(grip);
+      if (grip.bench === bench && plan.moved.has(grip.face)) this.dropGrip(grip);
     }
     this.regrip(bench);
     return plan;
@@ -564,7 +652,7 @@ export class FoldLab {
   }
 
   private remember(): void {
-    this.history.push({ book: (this.benches[0] as Bench).piece.book.clone(), log: this.log });
+    this.history.push({ book: (this.benches[0] as Bench).piece.book.clone(), log: this.log, recipeNext: this.recipe?.next ?? 0 });
   }
 
   /** Lab only: the game itself has no undo. */
@@ -573,8 +661,9 @@ export class FoldLab {
     if (!snapshot) return;
     this.clearBenches();
     this.log = snapshot.log;
+    if (this.recipe) this.recipe.next = snapshot.recipeNext;
     this.addBench(new SheetPiece(this.definition, snapshot.book));
-    this.rigidity = 0;
+    this.hardened = false;
     this.setMessage('Stepped back.');
   }
 
@@ -583,8 +672,9 @@ export class FoldLab {
     this.clearBenches();
     this.history.length = 0;
     this.log = [];
-    this.queue = [];
-    this.rigidity = 0;
+    this.recipe = null;
+    this.autoplay = false;
+    this.hardened = false;
     this.addBench(new SheetPiece(definition));
     this.setMessage(`A fresh sheet, ${definition.size / definition.cells} m between fold lines.`);
   }
@@ -597,39 +687,88 @@ export class FoldLab {
     return this.definition.cells;
   }
 
-  playRecipe(id: string): void {
-    const recipe = RECIPES.find((r) => r.id === id);
-    if (!recipe) throw new Error(`Unknown recipe "${id}".`);
-    this.reset();
-    this.queue = [...recipe.steps];
+  /** Tuning only: the paper's feel is meant to be one fixed value. */
+  setFloppiness(floppiness: number): void {
+    this.definition = { ...this.definition, floppiness };
+    for (const bench of this.benches) bench.piece.setFloppiness(floppiness);
+    this.notify();
   }
 
-  /** Applies a recipe at once, for tests and screenshots. */
-  applyRecipe(id: string): (FoldFailure | null)[] {
+  // ---- Recipes ----
+
+  private recipeById(id: string): Recipe {
     const recipe = RECIPES.find((r) => r.id === id);
     if (!recipe) throw new Error(`Unknown recipe "${id}".`);
-    this.reset();
-    const piece = (this.benches[0] as Bench).piece;
-    const results = recipe.steps.map((step) => applyStep(piece, step).failure);
-    this.log = recipe.steps;
-    return results;
+    return recipe;
   }
 
-  private nextQueued(): void {
-    const step = this.queue[0];
+  /** Lays out a recipe, ready to step through. */
+  openRecipe(id: string): void {
+    const recipe = this.recipeById(id);
+    this.reset();
+    this.recipe = { recipe, next: 0 };
+    this.setMessage(recipe.source);
+  }
+
+  /** Runs the next step, animated. */
+  nextStep(): void {
+    const step = this.recipe?.recipe.steps[this.recipe.next];
     const bench = this.benches[0];
-    if (!step || !bench || this.flapsBusy()) return;
-    this.queue.shift();
+    if (!this.recipe || !step || !bench || this.flapsBusy()) return;
     this.remember();
-    const plan = this.foldBench(bench, step.landing ?? { kind: 'over' }, toMirrorLine(bench.piece, step), step.side, gripFaces(bench.piece, step), true);
-    if (plan.failure) {
-      this.queue = [];
-      this.history.pop();
-      this.reportFailure(plan.failure);
-      return;
+    this.recipe.next++;
+
+    if (step.action === 'trim') {
+      this.trim(bench, step);
+    } else {
+      const { piece } = bench;
+      const request = foldRequest(piece.book, piece.definition.size, step);
+      const plan = this.foldBench(bench, step.landing ?? { kind: 'over' }, request.line, request.side, request.seeds, true);
+      if (plan.failure) {
+        this.history.pop();
+        this.recipe.next--;
+        this.autoplay = false;
+        this.setMessage(`"${step.label}" could not be done: ${FAILURE_TEXT[plan.failure]}`);
+        return;
+      }
     }
     this.log = [...this.log, step];
-    this.notify();
+    const done = this.recipe.next >= this.recipe.recipe.steps.length;
+    this.setMessage(done ? this.recipe.recipe.finish : step.label);
+  }
+
+  playAll(): void {
+    this.autoplay = true;
+  }
+
+  private trim(bench: Bench, step: TrimStep): void {
+    const { piece } = bench;
+    const scale = (piece.book.cells * UNITS_PER_CELL) / piece.definition.size;
+    const pieces = piece.cut({ kind: step.kind, c: Math.round(step.at * scale) }, step.from * scale, step.to * scale);
+    const largest = pieces.reduce((best, p) => (p.book.faces.length > best.book.faces.length ? p : best));
+    this.removeBench(bench);
+    this.addBench(largest);
+    this.scraps.burst(new Vector3(0, 0.1, 0), 18, [piece.definition.top, piece.definition.bottom], 0.6, 3);
+    this.shake.add(0.16);
+  }
+
+  /** Applies a recipe at once, for screenshots. */
+  applyRecipe(id: string, steps = Infinity): (FoldFailure | null)[] {
+    this.openRecipe(id);
+    const results: (FoldFailure | null)[] = [];
+    const recipe = this.recipe as unknown as { recipe: Recipe; next: number };
+    for (const step of recipe.recipe.steps.slice(0, steps)) {
+      const bench = this.benches[0] as Bench;
+      recipe.next++;
+      if (step.action === 'trim') {
+        this.trim(bench, step);
+        continue;
+      }
+      const { piece } = bench;
+      results.push(piece.fold(foldRequest(piece.book, piece.definition.size, step)).failure);
+      this.log = [...this.log, step];
+    }
+    return results;
   }
 
   // ---- Cutting ----
@@ -687,26 +826,25 @@ export class FoldLab {
     this.setOrbit(true);
     if (!cut || !source) return;
     const { bench } = source;
+    const { top, bottom } = bench.piece.definition;
+    for (const grip of this.grips.filter((g) => g.bench === bench)) this.dropGrip(grip);
     const pieces = bench.piece.cut(cut.line, cut.from, cut.to);
-    for (const piece of pieces) {
-      if (piece !== bench.piece) this.addBench(piece);
+    if (pieces.length > 1) {
+      this.removeBench(bench);
+      for (const piece of pieces) this.addBench(piece);
     }
-    for (const grip of [...this.grips]) if (grip.bench === bench) this.release(grip);
-    this.scraps.burst(new Vector3(0, 0.1, 0), 18, [bench.piece.definition.top, bench.piece.definition.bottom], 0.6, 2);
+    this.scraps.burst(new Vector3(0, 0.1, 0), 18, [top, bottom], 0.6, 2);
     this.shake.add(0.16);
     this.setMessage(pieces.length > 1 ? `Cut into ${pieces.length} pieces.` : 'Cut a slit.');
   }
 
   // ---- Hardening ----
 
-  setRigidity(rigidity: number): void {
-    this.rigidity = rigidity;
-    for (const bench of this.benches) {
-      bench.piece.settle();
-      this.regrip(bench);
-      bench.piece.harden(rigidity);
-    }
-    this.notify();
+  /** Finishes the paper: its present shape becomes one solid body. */
+  setHardened(hardened: boolean): void {
+    this.hardened = hardened;
+    for (const bench of this.benches) bench.piece.harden(hardened);
+    this.setMessage(hardened ? 'Hardened. It keeps this shape and no longer folds.' : 'Soft again.');
   }
 
   // ---- Frame ----
@@ -714,7 +852,13 @@ export class FoldLab {
   update(dt: number): void {
     if (!this.frozen) {
       const start = performance.now();
-      this.nextQueued();
+      if (this.autoplay) {
+        if (this.recipe && this.recipe.next < this.recipe.recipe.steps.length) {
+          if (!this.flapsBusy()) this.nextStep();
+        } else {
+          this.autoplay = false;
+        }
+      }
       this.followHands(dt);
       this.clock.advance(dt, (step) => {
         for (const bench of this.benches) bench.piece.step(step);
@@ -723,10 +867,10 @@ export class FoldLab {
       for (const bench of this.benches) if (bench.flap.update(dt)) this.landed(bench);
     }
     if (this.tool === 'cut' && this.cutFrom) this.showCutGuide(dt);
-    else this.updateGuess(dt);
+    else this.updateGuide(dt);
     for (const bench of this.benches) bench.view.update(bench.flap.hidden);
     for (const grip of this.grips) {
-      grip.marker.group.position.set(grip.pin.x, grip.pin.y, grip.pin.z);
+      grip.marker.group.position.set(grip.pin.heldX, grip.pin.heldY, grip.pin.heldZ);
       grip.marker.update(dt, this.camera);
     }
   }
@@ -777,22 +921,31 @@ export class FoldLab {
     return top;
   }
 
+  /** How many places paper is passing through itself right now. Slow: lab and tests only. */
+  crossings(): number {
+    return this.benches.reduce((sum, b) => sum + countCrossings(b.piece.soft.mesh, b.piece.soft.x), 0);
+  }
+
   readout(): LabReadout {
     const first = this.benches[0];
+    const { active, assessment } = this;
     return {
       pieces: this.benches.length,
       faces: this.benches.reduce((sum, b) => sum + b.piece.book.faces.length, 0),
       tallest: this.benches.reduce((most, b) => Math.max(most, b.piece.book.tallest), 0),
-      folds: this.log.length,
+      folds: this.log.filter((s) => s.action === 'fold').length,
       pins: this.grips.length,
       simulationMs: this.simulationMs,
       triangles: this.benches.reduce((sum, b) => sum + b.view.triangles, 0),
       stretch: first ? first.piece.soft.stretch() : 0,
       message: this.message,
       log: this.log,
-      rigidity: this.rigidity,
+      hardened: this.hardened,
       cellMetres: this.definition.size / this.definition.cells,
+      floppiness: this.definition.floppiness,
       height: this.height(),
+      held: active ? { x: active.pin.heldX, y: active.pin.heldY, z: active.pin.heldZ, ready: assessment?.reachable ?? false } : null,
+      recipe: this.recipe,
     };
   }
 }

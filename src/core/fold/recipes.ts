@@ -1,97 +1,193 @@
-import type { Landing } from './FoldBook';
+import type { FoldBook, FoldPlan, Landing } from './FoldBook';
 import { UNITS_PER_CELL } from './lattice';
 import type { LineKind, MirrorLine } from './lattice';
-import type { SheetPiece } from './SheetPiece';
 
 /**
- * A fold written down, so a design can be replayed exactly. This is also what a
+ * Folds written down, so a design can be replayed exactly. This is also what a
  * network message will be: a whole piece of origami fits in a few dozen bytes.
+ *
+ * Every position is in metres from the sheet's first corner, as the paper lies
+ * at that moment.
  */
 export interface FoldStep {
+  action: 'fold';
+  label: string;
   kind: LineKind;
-  /** Where the line sits, in metres from the sheet's corner. */
+  /** Where the line sits. */
   at: number;
   /** Which side moves: +1 or -1. */
   side: number;
   /** `all` grips every layer, `top` and `bottom` grip only that outer layer. */
   grip: 'all' | 'top' | 'bottom';
+  /** Grips one spot on that outer layer, rather than everything on the moving side. */
+  hold?: [number, number];
+  /** Grips every layer that started on this part of the flat sheet, like one half of a plane. */
+  from?: { axis: 'x' | 'z'; min?: number; max?: number };
   landing?: Landing;
 }
+
+/** Cuts a strip off. A recipe keeps the largest piece. */
+export interface TrimStep {
+  action: 'trim';
+  label: string;
+  kind: 'x' | 'z';
+  at: number;
+  from: number;
+  to: number;
+}
+
+export type RecipeStep = FoldStep | TrimStep;
 
 export interface Recipe {
   id: string;
   name: string;
-  steps: FoldStep[];
+  /** Where the fold sequence comes from. */
+  source: string;
+  /** What is left for players to do by hand. */
+  finish: string;
+  steps: RecipeStep[];
 }
 
-export function toMirrorLine(piece: SheetPiece, { kind, at }: Pick<FoldStep, 'kind' | 'at'>): MirrorLine {
-  const unitsPerMetre = (piece.book.cells * UNITS_PER_CELL) / piece.definition.size;
-  return { kind, c: Math.round(at * unitsPerMetre) };
+const unitsPerMetre = (book: FoldBook, size: number) => (book.cells * UNITS_PER_CELL) / size;
+
+export function toMirrorLine(book: FoldBook, size: number, { kind, at }: Pick<FoldStep, 'kind' | 'at'>): MirrorLine {
+  return { kind, c: Math.round(at * unitsPerMetre(book, size)) };
 }
 
 /** The faces a step's grip holds on the side that is moving. */
-export function gripFaces(piece: SheetPiece, step: FoldStep): number[] {
-  const { book } = piece;
+export function gripFaces(book: FoldBook, size: number, step: FoldStep): number[] {
+  if (step.from) {
+    const { axis, min = -Infinity, max = Infinity } = step.from;
+    const scale = unitsPerMetre(book, size);
+    const offset = axis === 'x' ? 0 : 1;
+    return book.faces.filter((f) => {
+      const i = f * 6 + offset;
+      const value = ((book.rest[i] as number) + (book.rest[i + 2] as number) + (book.rest[i + 4] as number)) / 3 / scale;
+      return value >= min && value <= max;
+    });
+  }
   if (step.grip === 'all') return book.faces;
-  const line = toMirrorLine(piece, step);
-  const outer = book.faces.filter((f) => {
+  const outer = (f: number) => {
     const stack = book.stackOf(f);
     return (step.grip === 'top' ? stack[stack.length - 1] : stack[0]) === f;
-  });
-  return outer.filter((f) => book.plan({ line, side: step.side, seeds: [f] }).moved.size > 0);
+  };
+  const line = toMirrorLine(book, size, step);
+  if (step.hold) {
+    const scale = unitsPerMetre(book, size);
+    const [x, z] = [step.hold[0] * scale, step.hold[1] * scale];
+    let best = -1;
+    let bestDistance = Infinity;
+    for (const f of book.faces) {
+      if (!outer(f)) continue;
+      const i = f * 6;
+      const cx = ((book.at[i] as number) + (book.at[i + 2] as number) + (book.at[i + 4] as number)) / 3;
+      const cz = ((book.at[i + 1] as number) + (book.at[i + 3] as number) + (book.at[i + 5] as number)) / 3;
+      const distance = Math.hypot(cx - x, cz - z);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        best = f;
+      }
+    }
+    return best < 0 ? [] : [best];
+  }
+  return book.faces.filter((f) => outer(f) && book.plan({ line, side: step.side, seeds: [f] }).moved.size > 0);
 }
 
-export function applyStep(piece: SheetPiece, step: FoldStep, swing = false) {
-  return piece.fold({ line: toMirrorLine(piece, step), side: step.side, seeds: gripFaces(piece, step), landing: step.landing }, swing);
+export function foldRequest(book: FoldBook, size: number, step: FoldStep) {
+  return { line: toMirrorLine(book, size, step), side: step.side, seeds: gripFaces(book, size, step), landing: step.landing };
 }
 
-const half = 5;
+/** Runs a fold on the Book alone, for tests and previews. */
+export function applyFold(book: FoldBook, size: number, step: FoldStep): FoldPlan {
+  return book.fold(foldRequest(book, size, step));
+}
+
+/** Runs a whole recipe on the Book alone, and reports the first step that failed. */
+export function runRecipe(recipe: Recipe, start: FoldBook, size: number): { book: FoldBook; failure: string | null } {
+  let book = start;
+  for (const step of recipe.steps) {
+    if (step.action === 'trim') {
+      const scale = unitsPerMetre(book, size);
+      const pieces = book.cutAlong({ kind: step.kind, c: Math.round(step.at * scale) }, step.from * scale, step.to * scale);
+      book = pieces.reduce((largest, piece) => (piece.faces.length > largest.faces.length ? piece : largest));
+      continue;
+    }
+    const plan = applyFold(book, size, step);
+    if (plan.failure) return { book, failure: `${step.label}: ${plan.failure}` };
+  }
+  return { book, failure: null };
+}
+
+const fold = (label: string, kind: LineKind, at: number, side: number, grip: FoldStep['grip'], extra: Partial<FoldStep> = {}): FoldStep => ({
+  action: 'fold', label, kind, at, side, grip, ...extra,
+});
+
+/** Real planes and boats start from a page, taller than it is wide. */
+const trim = (width: number): TrimStep => ({ action: 'trim', label: `Cut the sheet down to ${width} by 10 m`, kind: 'x', at: width, from: 0, to: 10 });
 
 export const RECIPES: readonly Recipe[] = [
   {
     id: 'book',
     name: 'Fold in half twice',
+    source: 'Basic test',
+    finish: 'Nothing left to do.',
     steps: [
-      { kind: 'x', at: half, side: 1, grip: 'all' },
-      { kind: 'z', at: half, side: 1, grip: 'all' },
+      fold('Fold in half', 'x', 5, 1, 'all'),
+      fold('Fold in half again', 'z', 5, 1, 'all'),
     ],
   },
   {
     id: 'letter',
     name: 'Letter fold',
+    source: 'Basic test: one flap ends up between two layers',
+    finish: 'Nothing left to do.',
     steps: [
-      { kind: 'x', at: 7, side: 1, grip: 'top' },
-      { kind: 'x', at: 3, side: -1, grip: 'top' },
+      fold('Fold the right third over', 'x', 7, 1, 'top'),
+      fold('Fold the left third over it', 'x', 3, -1, 'top'),
     ],
   },
   {
     id: 'blintz',
     name: 'Four corners',
+    source: 'Traditional blintz fold',
+    finish: 'Nothing left to do.',
     steps: [
-      { kind: 'sum', at: 5, side: -1, grip: 'top' },
-      { kind: 'sum', at: 15, side: 1, grip: 'top' },
-      { kind: 'diff', at: 5, side: 1, grip: 'top' },
-      { kind: 'diff', at: -5, side: -1, grip: 'top' },
+      fold('Corner to the centre', 'sum', 5, -1, 'top'),
+      fold('Corner to the centre', 'sum', 15, 1, 'top'),
+      fold('Corner to the centre', 'diff', 5, 1, 'top'),
+      fold('Corner to the centre', 'diff', -5, -1, 'top'),
     ],
   },
   {
     id: 'plane',
-    name: 'Paper dart',
+    name: 'Nakamura plane',
+    source: 'Nakamura Lock, after the Southwest Adopt-A-Pilot sheet',
+    finish: 'Flat so far. Pin the body, pull a wing up, then harden. That is the sheet\'s last step: bend the wings up.',
     steps: [
-      { kind: 'sum', at: 5, side: -1, grip: 'top' },
-      { kind: 'diff', at: 5, side: 1, grip: 'top' },
-      { kind: 'x', at: half, side: 1, grip: 'all' },
+      trim(6),
+      fold('Top left corner to the centre line', 'sum', 3, -1, 'top'),
+      fold('Top right corner to the centre line', 'diff', 3, 1, 'top'),
+      fold('Fold the triangle down', 'z', 4, -1, 'all'),
+      fold('New left corner to the centre line', 'sum', 7, -1, 'all'),
+      fold('New right corner to the centre line', 'diff', -1, 1, 'all'),
+      fold('Fold the tip up over them: the Nakamura lock', 'z', 7, 1, 'top', { hold: [3, 7.6] }),
+      fold('Fold in half behind, with the flaps outside', 'x', 3, 1, 'all', { landing: { kind: 'under' } }),
+      fold('Fold the top wing down', 'x', 2, -1, 'all', { from: { axis: 'x', max: 3 } }),
+      fold('Fold the other wing down', 'x', 2, -1, 'all', { from: { axis: 'x', min: 3 }, landing: { kind: 'under' } }),
     ],
   },
   {
-    id: 'boat',
-    name: 'Paper boat',
+    id: 'hat',
+    name: 'Boat: the hat',
+    source: 'Traditional paper boat, after the Nottinghamshire Mayflower sheet, steps 1 to 4',
+    finish: 'A flat hat. The real boat continues by opening this pocket and flattening it, which is not a simple fold.',
     steps: [
-      { kind: 'sum', at: 5, side: -1, grip: 'top' },
-      { kind: 'sum', at: 15, side: 1, grip: 'top' },
-      { kind: 'diff', at: 5, side: 1, grip: 'top' },
-      { kind: 'diff', at: -5, side: -1, grip: 'top' },
-      { kind: 'x', at: half, side: 1, grip: 'all' },
+      trim(8),
+      fold('Fold the top half down', 'z', 5, -1, 'all'),
+      fold('Left corner to the middle, leaving a brim', 'sum', 9, -1, 'all'),
+      fold('Right corner to the middle, leaving a brim', 'diff', -1, 1, 'all'),
+      fold('Fold the front brim up', 'z', 9, 1, 'top'),
+      fold('Fold the back brim up', 'z', 9, 1, 'bottom', { landing: { kind: 'under' } }),
     ],
   },
 ];

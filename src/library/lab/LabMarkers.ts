@@ -11,6 +11,8 @@ const DASHES = 44;
 export class PinMarker {
   readonly group = new Group();
   private readonly pop = new Spring(0, 3.5, 0.32);
+  private ready = false;
+  private time = 0;
 
   constructor(colour: string) {
     const material = new MeshBasicMaterial({ color: colour });
@@ -25,8 +27,15 @@ export class PinMarker {
     this.pop.target = 1;
   }
 
+  /** A pin that would crease if dropped pulses, inviting the click. */
+  setReady(ready: boolean): void {
+    this.ready = ready;
+  }
+
   update(dt: number, camera: { quaternion: Quaternion }): void {
-    const s = Math.max(0.001, this.pop.update(dt));
+    this.time += dt;
+    const pulse = this.ready ? 1 + Math.sin(this.time * 9) * 0.14 : 1;
+    const s = Math.max(0.001, this.pop.update(dt)) * pulse;
     this.group.scale.set(s, 1 / Math.sqrt(s) * s, s);
     for (const child of this.group.children.slice(1)) child.quaternion.copy(camera.quaternion);
   }

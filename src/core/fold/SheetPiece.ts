@@ -29,7 +29,7 @@ export class SheetPiece {
   constructor(
     readonly definition: SheetDefinition,
     public book: FoldBook = FoldBook.sheet(definition.cells),
-    private readonly settings: Partial<SoftSettings> = {},
+    private settings: Partial<SoftSettings> = {},
     initial?: Float64Array,
   ) {
     this.soft = new SoftSheet(buildSoftMesh(book, definition.size), this.solverSettings(), initial);
@@ -54,6 +54,11 @@ export class SheetPiece {
 
   step(dt: number): void {
     this.soft.step(dt);
+  }
+
+  setFloppiness(floppiness: number): void {
+    this.settings = { ...this.settings, floppiness };
+    this.soft.setFloppiness(floppiness);
   }
 
   /** World position of every face corner, in face order. */
@@ -338,9 +343,9 @@ export class SheetPiece {
     return pieces;
   }
 
-  /** Sets how firmly the paper holds its present shape. 1 is one solid body. */
-  harden(rigidity: number): void {
-    this.soft.harden(rigidity);
+  /** Freezes the paper's present shape into one solid body, or releases it. */
+  harden(solid: boolean): void {
+    this.soft.harden(solid);
   }
 }
 

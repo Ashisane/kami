@@ -24,8 +24,10 @@ export interface CaptureRequest {
   cells?: number;
   /** Hold a flat spot up: x, z, height. */
   hold?: [number, number, number];
-  /** Sets rigidity after everything else. */
-  rigidity?: number;
+  /** How many recipe steps to run. Defaults to all of them. */
+  steps?: number;
+  /** Hardens the paper after everything else. */
+  harden?: boolean;
   /** Simulation steps to run before the shot. */
   settle?: number;
   clip?: string;
@@ -75,6 +77,7 @@ export function installDebugApi({ stage, store }: LibraryContext, selectionLoade
     roundTrip,
     errors: [] as string[],
     lab: () => stage.lab?.readout() ?? null,
+    crossings: () => stage.lab?.crossings() ?? 0,
     /** Where a world point appears on screen, so a test can aim the real mouse at it. */
     screenOf(x: number, y: number, z: number): [number, number] {
       const point = new Vector3(x, y, z).project(stage.camera);
@@ -105,11 +108,11 @@ export function installDebugApi({ stage, store }: LibraryContext, selectionLoade
         const { lab } = stage;
         lab.frozen = true;
         if (request.cells) lab.setCells(request.cells);
-        const failures = request.recipe ? lab.applyRecipe(request.recipe).filter(Boolean) : [];
+        const failures = request.recipe ? lab.applyRecipe(request.recipe, request.steps).filter(Boolean) : [];
         if (failures.length) throw new Error(`Recipe ${request.recipe} failed: ${failures.join(', ')}`);
         if (request.hold) lab.holdAt(...request.hold);
         if (request.settle) lab.settle(request.settle);
-        if (request.rigidity !== undefined) lab.setRigidity(request.rigidity);
+        if (request.harden) lab.setHardened(true);
         lab.update(0);
       }
       if (request.tab) store.set({ tab: request.tab });

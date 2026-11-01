@@ -25,6 +25,8 @@ export interface SoftMesh {
   /** a b c d per hinge: a b is the shared edge, c d the two wings. */
   hinges: Int32Array;
   hingeLayers: Float64Array;
+  /** 1 where a hinge is a made crease, which wants to stay shut. */
+  hingeFolded: Uint8Array;
   /** Which triangle each book face belongs to, by face id; -1 if not in this piece. */
   faceTri: Int32Array;
   /** Which vertex each face corner belongs to: index by face * 3 + corner. */
@@ -160,6 +162,7 @@ export function buildSoftMesh(book: FoldBook, size: number, peeled: ReadonlySet<
   const edgeLength = new Float64Array(edgeTris.size);
   const hingeList: number[] = [];
   const hingeLayerList: number[] = [];
+  const hingeFoldedList: number[] = [];
   const opposite = (t: number, a: number, b: number) => {
     for (let k = 0; k < 3; k++) {
       const v = tris[t * 3 + k] as number;
@@ -168,6 +171,13 @@ export function buildSoftMesh(book: FoldBook, size: number, peeled: ReadonlySet<
     return -1;
   };
   const isLifted = (t: number) => peeled.has((groups[t] as number[])[0] as number);
+  /** True when two wings lie on the same side of an edge, so the paper there is folded shut. */
+  const sameSide = (a: number, b: number, c: number, d: number) => {
+    const ax = flat[a * 2] as number, az = flat[a * 2 + 1] as number;
+    const ex = (flat[b * 2] as number) - ax, ez = (flat[b * 2 + 1] as number) - az;
+    const side = (v: number) => ex * ((flat[v * 2 + 1] as number) - az) - ez * ((flat[v * 2] as number) - ax);
+    return side(c) * side(d) > 0;
+  };
 
   let e = 0;
   for (const [key, list] of edgeTris) {
@@ -177,14 +187,17 @@ export function buildSoftMesh(book: FoldBook, size: number, peeled: ReadonlySet<
     edges[e * 2 + 1] = b;
     edgeLength[e] = Math.hypot((flat[a * 2] as number) - (flat[b * 2] as number), (flat[a * 2 + 1] as number) - (flat[b * 2 + 1] as number));
     e++;
-    // A peeled flap meets its stack at a free crease, so that pair gets no hinge.
+    // A peeled flap meets its stack along a made crease, which wants to stay shut.
     for (let i = 0; i < list.length; i++) {
       for (let j = i + 1; j < list.length; j++) {
         const s = list[i] as number;
         const t = list[j] as number;
-        if (isLifted(s) !== isLifted(t)) continue;
-        hingeList.push(a, b, opposite(s, a, b), opposite(t, a, b));
+        const wingS = opposite(s, a, b), wingT = opposite(t, a, b);
+        const folded = sameSide(a, b, wingS, wingT);
+        if (folded && isLifted(s) === isLifted(t)) continue;
+        hingeList.push(a, b, wingS, wingT);
         hingeLayerList.push(((triLayers[s] as number) + (triLayers[t] as number)) / 2);
+        hingeFoldedList.push(folded ? 1 : 0);
       }
     }
   }
@@ -213,6 +226,7 @@ export function buildSoftMesh(book: FoldBook, size: number, peeled: ReadonlySet<
     edgeLength,
     hinges: Int32Array.from(hingeList),
     hingeLayers: Float64Array.from(hingeLayerList),
+    hingeFolded: Uint8Array.from(hingeFoldedList),
     faceTri,
     cornerVertex,
     vertexLayers,

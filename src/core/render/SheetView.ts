@@ -92,7 +92,7 @@ export class SheetView {
       normal[i + 2] = (normal[i + 2] as number) / length;
     }
 
-    const rounding = soft.rigidity >= 1 ? 0 : ROUNDING;
+    const rounding = soft.hardened ? 0 : ROUNDING;
     const P = this.patchPosition, N = this.patchNormal;
     let o = 0;
     for (let t = 0; t < triCount; t++) {

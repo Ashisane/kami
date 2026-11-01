@@ -23,7 +23,7 @@ export const DEFAULT_SOFT: SoftSettings = {
   substeps: 12,
   gravity: 9.8,
   thickness: 0.03,
-  floppiness: 1,
+  floppiness: 0.25,
   airDrag: 1.4,
   friction: 0.8,
 };
@@ -35,12 +35,29 @@ export interface Pin {
   b0: number;
   b1: number;
   b2: number;
+  /** Where the hand wants to be. */
   x: number;
   y: number;
   z: number;
+  /** Where the hand actually is. It chases the target, at a speed paper can follow. */
+  heldX: number;
+  heldY: number;
+  heldZ: number;
 }
 
 const BEND_COMPLIANCE = 0.02;
+/** A made crease holds far harder than flat paper, so a fold stays shut. */
+const CREASE_COMPLIANCE = 0.0015;
+/**
+ * The sharpest an uncreased edge can bend. This gives paper a minimum bend
+ * radius: it rolls where cloth would crumple, which is what stops it folding
+ * into itself. Only a committed fold makes a sharp crease.
+ */
+const BEND_LIMIT = 0.85;
+/** Fastest a hand can drag paper, in metres per second. Faster and layers tunnel. */
+const HAND_SPEED = 7;
+/** Substeps between contact searches. */
+const CONTACT_INTERVAL = 4;
 /** Bending stiffness of a stack grows with the cube of its thickness, as a real beam's does. */
 const STACK_STIFFENING = 3;
 const PIN_STRENGTH = 0.7;
@@ -48,10 +65,12 @@ const DAMPING = 0.998;
 /** Fastest a point may move per substep, in sheet thicknesses, so layers cannot pass through. */
 const MAX_TRAVEL = 0.45;
 
-const CONTACT_SAMPLES = [1 / 3, 1 / 3, 1 / 3, 0.5, 0.5, 0, 0, 0.5, 0.5, 0.5, 0, 0.5];
+const CONTACT_SAMPLES = [1 / 3, 1 / 3, 1 / 3, 0.5, 0.5, 0, 0, 0.5, 0.5, 0.5, 0, 0.5, 0.9, 0.05, 0.05, 0.05, 0.9, 0.05, 0.05, 0.05, 0.9];
 const SAMPLE_COUNT = CONTACT_SAMPLES.length / 3;
 const CONTACT_REACH = 0.2;
 const INSIDE_MARGIN = 0.03;
+/** Contact searches a remembered side outlives once the paper has moved apart. */
+const SIDE_MEMORY = 6;
 
 export class SoftSheet {
   readonly x: Float64Array;
@@ -59,9 +78,6 @@ export class SoftSheet {
   readonly w: Float64Array;
   readonly pins: Pin[] = [];
   readonly settings: SoftSettings;
-
-  /** 0 is cloth, up to 1 which is one solid body. See `harden`. */
-  rigidity = 0;
 
   private readonly p: Float64Array;
   private readonly hingeRest: Float64Array;
@@ -71,6 +87,7 @@ export class SoftSheet {
 
   // Sides remembered per contact, so a layer that goes too far is pushed back the right way.
   private readonly sides = new Map<number, number>();
+  private contactFrame = 0;
   private contactTri = new Int32Array(1 << 12);
   private contactSample = new Int32Array(1 << 12);
   private contactOther = new Int32Array(1 << 12);
@@ -117,13 +134,26 @@ export class SoftSheet {
     this.hingeCompliance = new Float64Array(hinges);
     this.hingePrevious = new Float64Array(hinges);
     this.applyStiffness();
-    for (let h = 0; h < hinges; h++) this.hingePrevious[h] = this.hingeAngle(h);
+    for (let h = 0; h < hinges; h++) {
+      const angle = this.hingeAngle(h);
+      this.hingePrevious[h] = angle;
+      if (mesh.hingeFolded[h]) this.hingeRest[h] = angle < 0 ? -Math.PI : Math.PI;
+    }
+  }
+
+  /** Sets how easily paper bends. Creases hold the same however floppy the sheet is. */
+  setFloppiness(floppiness: number): void {
+    this.settings.floppiness = floppiness;
+    this.applyStiffness();
   }
 
   private applyStiffness(): void {
     const { floppiness } = this.settings;
+    const { hingeFolded, hingeLayers } = this.mesh;
     for (let h = 0; h < this.hingeCompliance.length; h++) {
-      this.hingeCompliance[h] = (BEND_COMPLIANCE * floppiness) / (this.mesh.hingeLayers[h] as number) ** STACK_STIFFENING;
+      const layers = hingeLayers[h] as number;
+      // A crease is a line of weakness: thicker paper resists it only a little.
+      this.hingeCompliance[h] = hingeFolded[h] ? CREASE_COMPLIANCE / layers : (BEND_COMPLIANCE * floppiness) / layers ** STACK_STIFFENING;
     }
   }
 
@@ -148,8 +178,11 @@ export class SoftSheet {
   }
 
   addPin(tri: number, b0: number, b1: number, b2: number): Pin {
-    const pin: Pin = { tri, b0, b1, b2, x: 0, y: 0, z: 0 };
+    const pin: Pin = { tri, b0, b1, b2, x: 0, y: 0, z: 0, heldX: 0, heldY: 0, heldZ: 0 };
     this.pinPoint(pin, pin);
+    pin.heldX = pin.x;
+    pin.heldY = pin.y;
+    pin.heldZ = pin.z;
     this.pins.push(pin);
     return pin;
   }
@@ -174,9 +207,10 @@ export class SoftSheet {
     const h = dt / substeps;
     this.applyAir(dt);
     const rigid = this.solid !== null;
-    if (!rigid) this.findContacts();
     for (let s = 0; s < substeps; s++) {
+      if (!rigid && s % CONTACT_INTERVAL === 0) this.findContacts();
       this.integrate(h);
+      this.moveHands(h);
       this.solvePins();
       if (rigid) {
         this.solveGround();
@@ -243,6 +277,18 @@ export class SoftSheet {
     }
   }
 
+  private moveHands(h: number): void {
+    const reach = HAND_SPEED * h;
+    for (const pin of this.pins) {
+      const dx = pin.x - pin.heldX, dy = pin.y - pin.heldY, dz = pin.z - pin.heldZ;
+      const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      const k = distance > reach ? reach / distance : 1;
+      pin.heldX += dx * k;
+      pin.heldY += dy * k;
+      pin.heldZ += dz * k;
+    }
+  }
+
   private solvePins(): void {
     const { tris } = this.mesh;
     const { x, w } = this;
@@ -256,7 +302,7 @@ export class SoftSheet {
       const total = wa * pin.b0 + wb * pin.b1 + wc * pin.b2;
       if (total === 0) continue;
       const s = PIN_STRENGTH / total;
-      const dx = (pin.x - px) * s, dy = (pin.y - py) * s, dz = (pin.z - pz) * s;
+      const dx = (pin.heldX - px) * s, dy = (pin.heldY - py) * s, dz = (pin.heldZ - pz) * s;
       x[a] = (x[a] as number) + dx * wa; x[a + 1] = (x[a + 1] as number) + dy * wa; x[a + 2] = (x[a + 2] as number) + dz * wa;
       x[b] = (x[b] as number) + dx * wb; x[b + 1] = (x[b + 1] as number) + dy * wb; x[b + 2] = (x[b + 2] as number) + dz * wb;
       x[c] = (x[c] as number) + dx * wc; x[c + 1] = (x[c + 1] as number) + dy * wc; x[c + 2] = (x[c + 2] as number) + dz * wc;
@@ -284,6 +330,7 @@ export class SoftSheet {
   private solveHinges(h: number): void {
     const { hinges } = this.mesh;
     const { x, w } = this;
+    const { hingeFolded } = this.mesh;
     const count = hinges.length / 4;
     const inverseStep = 1 / (h * h);
     for (let n = 0; n < count; n++) {
@@ -313,7 +360,12 @@ export class SoftSheet {
       const wa = w[ia] as number, wb = w[ib] as number, wc = w[ic] as number, wd = w[id] as number;
       const weight = wa * (gax * gax + gay * gay + gaz * gaz) + wb * (gbx * gbx + gby * gby + gbz * gbz)
         + wc * (gcx * gcx + gcy * gcy + gcz * gcz) + wd * (gdx * gdx + gdy * gdy + gdz * gdz);
-      const lambda = -(angle - (this.hingeRest[n] as number)) / (weight + (this.hingeCompliance[n] as number) * inverseStep);
+      // Past the bend limit the edge stops dead, instead of springing softly.
+      const bend = angle - (this.hingeRest[n] as number);
+      const overLimit = !hingeFolded[n] && Math.abs(bend) > BEND_LIMIT;
+      const error = overLimit ? bend - Math.sign(bend) * BEND_LIMIT : bend;
+      const softness = overLimit ? 0 : (this.hingeCompliance[n] as number) * inverseStep;
+      const lambda = -error / (weight + softness);
       x[a] = (x[a] as number) + wa * gax * lambda; x[a + 1] = (x[a + 1] as number) + wa * gay * lambda; x[a + 2] = (x[a + 2] as number) + wa * gaz * lambda;
       x[b] = (x[b] as number) + wb * gbx * lambda; x[b + 1] = (x[b + 1] as number) + wb * gby * lambda; x[b + 2] = (x[b + 2] as number) + wb * gbz * lambda;
       x[c] = (x[c] as number) + wc * gcx * lambda; x[c + 1] = (x[c + 1] as number) + wc * gcy * lambda; x[c + 2] = (x[c + 2] as number) + wc * gcz * lambda;
@@ -329,6 +381,7 @@ export class SoftSheet {
     const key = (i: number, j: number, k: number) => (i + 512) * 1048576 + (j + 512) * 1024 + (k + 512);
     grid.clear();
     this.contactCount = 0;
+    this.contactFrame++;
     for (let t = 0; t < triCount; t++) {
       const a = (tris[t * 3] as number) * 3, b = (tris[t * 3 + 1] as number) * 3, c = (tris[t * 3 + 2] as number) * 3;
       const cx = ((x[a] as number) + (x[b] as number) + (x[c] as number)) / 3;
@@ -377,9 +430,16 @@ export class SoftSheet {
     const length = Math.sqrt(nx * nx + ny * ny + nz * nz);
     if (length < 1e-9) return;
     nx /= length; ny /= length; nz /= length;
+    const p0 = (tris[t * 3] as number) * 3, p1 = (tris[t * 3 + 1] as number) * 3, p2 = (tris[t * 3 + 2] as number) * 3;
+
+    // All three corners well clear on one side means nothing here can be touching.
+    const h0 = ((x[p0] as number) - (x[a] as number)) * nx + ((x[p0 + 1] as number) - (x[a + 1] as number)) * ny + ((x[p0 + 2] as number) - (x[a + 2] as number)) * nz;
+    const h1 = ((x[p1] as number) - (x[a] as number)) * nx + ((x[p1 + 1] as number) - (x[a + 1] as number)) * ny + ((x[p1 + 2] as number) - (x[a + 2] as number)) * nz;
+    const h2 = ((x[p2] as number) - (x[a] as number)) * nx + ((x[p2 + 1] as number) - (x[a + 1] as number)) * ny + ((x[p2 + 2] as number) - (x[a + 2] as number)) * nz;
+    if ((h0 > CONTACT_REACH && h1 > CONTACT_REACH && h2 > CONTACT_REACH) || (h0 < -CONTACT_REACH && h1 < -CONTACT_REACH && h2 < -CONTACT_REACH)) return;
+
     const d00 = abx * abx + aby * aby + abz * abz, d01 = abx * acx + aby * acy + abz * acz, d11 = acx * acx + acy * acy + acz * acz;
     const det = d00 * d11 - d01 * d01;
-    const p0 = (tris[t * 3] as number) * 3, p1 = (tris[t * 3 + 1] as number) * 3, p2 = (tris[t * 3 + 2] as number) * 3;
 
     for (let s = 0; s < SAMPLE_COUNT; s++) {
       const b0 = CONTACT_SAMPLES[s * 3] as number, b1 = CONTACT_SAMPLES[s * 3 + 1] as number, b2 = CONTACT_SAMPLES[s * 3 + 2] as number;
@@ -389,20 +449,14 @@ export class SoftSheet {
       const d20 = px * abx + py * aby + pz * abz, d21 = px * acx + py * acy + pz * acz;
       const u = (d11 * d20 - d01 * d21) / det, v = (d00 * d21 - d01 * d20) / det;
       const memory = (t * SAMPLE_COUNT + s) * triCount + o;
-      if (u < -INSIDE_MARGIN || v < -INSIDE_MARGIN || u + v > 1 + INSIDE_MARGIN) {
-        this.sides.delete(memory);
-        continue;
-      }
+      if (u < -INSIDE_MARGIN || v < -INSIDE_MARGIN || u + v > 1 + INSIDE_MARGIN) continue;
       const distance = px * nx + py * ny + pz * nz;
-      let side = this.sides.get(memory);
-      if (side === undefined) {
-        if (Math.abs(distance) > CONTACT_REACH) continue;
-        side = distance >= 0 ? 1 : -1;
-        this.sides.set(memory, side);
-      } else if (Math.abs(distance) > CONTACT_REACH * 3) {
-        this.sides.delete(memory);
-        continue;
-      }
+      // A side is remembered as a signed age, and forgotten once it goes stale.
+      const stored = this.sides.get(memory);
+      const fresh = stored !== undefined && this.contactFrame - Math.abs(stored) <= SIDE_MEMORY;
+      if (!fresh && Math.abs(distance) > CONTACT_REACH) continue;
+      const side = fresh ? Math.sign(stored) : distance >= 0 ? 1 : -1;
+      this.sides.set(memory, side * this.contactFrame);
       this.pushContact(t, s, o, side);
     }
   }
@@ -490,25 +544,14 @@ export class SoftSheet {
     for (let i = 0; i < x.length; i++) v[i] = ((x[i] as number) - (p[i] as number)) * scale;
   }
 
-  /**
-   * Sets how much the sheet holds its current shape. Anything above 0 remembers
-   * this pose as its rest shape, and 1 makes it one solid body. Build the shape
-   * by holding the paper, then harden it where it stands.
-   */
-  harden(rigidity: number): void {
-    this.rigidity = rigidity;
+  /** Freezes the shape the paper holds right now into one solid body, or lets it go soft again. */
+  harden(solid: boolean): void {
     this.solid = null;
-    if (rigidity >= 1) {
-      this.captureSolid();
-      return;
-    }
-    for (let h = 0; h < this.hingeRest.length; h++) this.hingeRest[h] = rigidity > 0 ? this.hingeAngle(h) : 0;
-    this.applyStiffness();
-    if (rigidity > 0) {
-      const memory = (1 - rigidity) ** 4;
-      for (let h = 0; h < this.hingeCompliance.length; h++) this.hingeCompliance[h] = (this.hingeCompliance[h] as number) * memory;
-      for (let h = 0; h < this.hingePrevious.length; h++) this.hingePrevious[h] = this.hingeRest[h] as number;
-    }
+    if (solid) this.captureSolid();
+  }
+
+  get hardened(): boolean {
+    return this.solid !== null;
   }
 
   private centreOfMass(): [number, number, number] {

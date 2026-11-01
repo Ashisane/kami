@@ -392,6 +392,26 @@
   color: var(--vermilion-deep);
   font-weight: 500;
 }
+.recipe:not(:empty) {
+  margin-top: 10px;
+}
+.recipe-steps {
+  margin: 8px 0 0;
+  padding-left: 20px;
+  font-size: 13px;
+  color: var(--ink-soft);
+}
+.recipe-steps li {
+  padding: 2px 0;
+}
+.recipe-steps .done {
+  color: var(--ink-faint);
+  text-decoration: line-through;
+}
+.recipe-steps .current {
+  color: var(--vermilion-deep);
+  font-weight: 500;
+}
 .lab-hints {
   margin-top: 8px;
 }

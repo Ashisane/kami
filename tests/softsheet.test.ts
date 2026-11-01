@@ -8,7 +8,7 @@ import { FoldBook } from '@/core/fold/FoldBook';
 
 const sheet: SheetDefinition = {
   id: 'sheet.test', name: 'Test', description: '', size: 10, cells: 20,
-  top: 'vermilion', bottom: 'washi', edge: 'washi', thickness: 0.03, density: 0.4, floppiness: 1,
+  top: 'vermilion', bottom: 'washi', edge: 'washi', thickness: 0.03, density: 0.4, floppiness: 0.25,
 };
 const m = (metres: number) => metres * 2 * U;
 const line = (kind: LineKind, metres: number): MirrorLine => ({ kind, c: m(metres) });
@@ -172,6 +172,30 @@ describe('folded paper in the solver', () => {
     expect(piece.soft.mesh.triCount).toBe(400);
   });
 
+  it('keeps a crease shut while a flap is pulled, instead of opening like cloth', () => {
+    const piece = new SheetPiece(sheet);
+    foldAll(piece, line('x', 5), 1);
+    run(piece, 20);
+    const top = piece.book.faces.find((f) => piece.book.flipped[f] === 1 && piece.book.stackOf(f).at(-1) === f) as number;
+    piece.peel(top);
+    const { soft } = piece;
+    const creases = soft.mesh.hingeFolded.reduce((sum, f) => sum + f, 0);
+    expect(creases).toBeGreaterThan(10);
+    // Lift the flap's free edge a little and let the solver work.
+    const free = soft.mesh.faceTri[top] as number;
+    const pin = soft.addPin(free, 1, 0, 0);
+    soft.pinPoint(pin, pin);
+    for (let i = 0; i < 60; i++) {
+      pin.y = Math.min(0.8, pin.y + 0.02);
+      piece.step(DT);
+    }
+    let widest = 0;
+    for (let h = 0; h < soft.mesh.hingeFolded.length; h++) {
+      if (soft.mesh.hingeFolded[h]) widest = Math.max(widest, Math.PI - Math.abs(soft.angleAt(h)));
+    }
+    expect(widest).toBeLessThan(0.6);
+  });
+
   it('refuses to peel a flap with another layer on top of it', () => {
     const piece = new SheetPiece(sheet);
     foldAll(piece, line('x', 5), 1);
@@ -192,7 +216,7 @@ describe('hardening', () => {
       piece.step(DT);
     }
     soft.removePin(pin);
-    soft.harden(1);
+    soft.harden(true);
     const edge = (x: Float64Array) => {
       const { edges, edgeLength } = soft.mesh;
       const n = edgeLength.length >> 1;
@@ -209,20 +233,12 @@ describe('hardening', () => {
     expect(heights(piece).low).toBeGreaterThanOrEqual(0);
   });
 
-  it('springs back towards its hardened shape when only partly rigid', () => {
+  it('softens again when released', () => {
     const piece = new SheetPiece(sheet);
-    const { soft } = piece;
-    const pin = soft.addPin(0, 1, 0, 0);
-    soft.pinPoint(pin, pin);
-    for (let i = 0; i < 60; i++) {
-      pin.y += 0.05;
-      piece.step(DT);
-    }
-    soft.harden(0.9);
-    soft.removePin(pin);
-    run(piece, 60);
-    expect(Number.isFinite(heights(piece).top)).toBe(true);
-    expect(soft.stretch()).toBeLessThan(0.05);
+    piece.harden(true);
+    expect(piece.soft.hardened).toBe(true);
+    piece.harden(false);
+    expect(piece.soft.hardened).toBe(false);
   });
 });
 

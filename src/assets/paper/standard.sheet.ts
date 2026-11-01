@@ -11,5 +11,5 @@ export default defineSheet({
   edge: 'washi',
   thickness: 0.03,
   density: 0.4,
-  floppiness: 1,
+  floppiness: 0.25,
 });

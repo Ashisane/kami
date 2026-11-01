@@ -98,7 +98,8 @@ async function boot(): Promise<void> {
     if (event.key in views) store.set({ view: views[event.key as keyof typeof views] });
     else if (event.key === ' ') {
       event.preventDefault();
-      stage.deck.toggle();
+      if (stage.lab) stage.lab.dropHeld();
+      else stage.deck.toggle();
     } else if (event.key === 'c') store.set({ colliders: !state.colliders });
     else if (event.key === 's') store.set({ sockets: !state.sockets });
     else if (event.key === 'h') store.set({ scale: !state.scale });
@@ -108,7 +109,8 @@ async function boot(): Promise<void> {
     else if (event.key === 'z') stage.lab?.stepBack();
     else if (event.key === 'r') stage.lab?.reset();
     else if (event.key === 'x' && stage.lab) stage.lab.tool = stage.lab.tool === 'cut' ? 'fold' : 'cut';
-    else if (event.key === 'Escape') stage.lab?.releaseAll();
+    else if (event.key === 'n') stage.lab?.nextStep();
+    else if (event.key === 'Escape') stage.lab?.letGoAll();
   });
 
   // Status is read straight from the renderer, once a second so it stays legible.
