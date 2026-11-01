@@ -115,6 +115,12 @@ seen, and that bends away from whatever covers it. The Book only hears about it 
 the pin is dropped, and refuses a fold that would jam. A lifted layer covers nothing,
 so opening a wing exposes what was under it.
 
+How far it comes up depends on what still holds it. Measured on the lock tip, with
+paper held down beside it: straight after its fold it rises 1 m clear. Once the plane
+is folded in half, the tip is creased along the keel with one free point, so it
+strains up about 0.36 m. On the finished plane it is buried under the wing and shows
+from neither side, so what shows at the nose there is a different layer.
+
 ## How high layers sit
 
 `layerHeights` gives every corner of every face a true height. The cloth is one
@@ -221,5 +227,10 @@ longer join become separate sheets. A slit stays one piece and stays open.
   paper tucks away. Tucking them first left no workable layer order.
 - **An opening can stall the frame.** The layer search is capped, but it runs on the
   main thread and can take a few seconds.
+- **A plane held up rolls.** Two hands make an axis, so the weight of an open wing turns
+  it, and the wing below can end up edge-on. Orbit the camera to reach it.
+- **Layers pinned on all sides barely lift.** A visible patch held by a crease or a
+  cover along every edge has few free points, so it carries its neighbours along. With
+  no pin near it, pulling raises the whole nose.
 - **Remembered-side contact** can tangle in principle (Baraff et al.). It only
   matters while paper is loose, and each fold replaces it with the Book's truth.

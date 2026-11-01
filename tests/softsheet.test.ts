@@ -310,6 +310,49 @@ describe('folded paper in the solver', () => {
     }
   });
 
+  it('raises the lock tip clear of the paper held down beside it', () => {
+    let piece = new SheetPiece(sheet);
+    const plane = RECIPES.find((r) => r.id === 'plane') as Recipe;
+    let tip = new Set<number>();
+    for (const step of plane.steps) {
+      if (step.action === 'trim') {
+        const pieces = piece.cut({ kind: step.kind, c: step.at * 2 * U }, step.from * 2 * U, step.to * 2 * U);
+        piece = pieces.reduce((a, b) => (b.book.faces.length > a.book.faces.length ? b : a));
+      } else if (step.action === 'fold') {
+        tip = new Set(piece.fold(foldRequest(piece.book, 10, step)).moved);
+        if (step.label.includes('Nakamura lock')) break;
+      }
+    }
+    run(piece, 20);
+    const { book } = piece;
+    expect(piece.peel([...tip].find((f) => book.stackOf(f).at(-1) === f) as number)).toBe(true);
+    const { soft } = piece;
+    const { mesh } = soft;
+    const tris = Array.from({ length: mesh.triCount }, (_, t) => t);
+    const stackPoints = new Set(tris.filter((t) => mesh.triFlap[t] < 0).flatMap((t) => [0, 1, 2].map((k) => mesh.tris[t * 3 + k] as number)));
+    // A hand on the free end of the tip, and hands on the stack a little way off.
+    const handTri = tris.find((t) => mesh.triFlap[t] === 0 && !stackPoints.has(mesh.tris[t * 3] as number)) as number;
+    const hand = soft.addPin(handTri, 1, 0, 0);
+    soft.pinPoint(hand, hand);
+    const from = { x: hand.x, y: hand.y, z: hand.z };
+    const away = (t: number) => Math.hypot((soft.x[(mesh.tris[t * 3] as number) * 3] as number) - from.x, (soft.x[(mesh.tris[t * 3] as number) * 3 + 2] as number) - from.z);
+    const held = tris.filter((t) => mesh.triFlap[t] < 0 && away(t) > 0.8).sort((a, b) => away(a) - away(b)).slice(0, 8);
+    for (const t of held) {
+      const pin = soft.addPin(t, 1, 0, 0);
+      soft.pinPoint(pin, pin);
+    }
+    for (let i = 0; i < 90; i++) {
+      hand.y += 0.012;
+      piece.step(DT);
+    }
+    const now = { x: 0, y: 0, z: 0 };
+    soft.pinPoint(hand, now);
+    const pinned = { x: 0, y: 0, z: 0 };
+    soft.pinPoint(soft.pins[1] as (typeof soft.pins)[number], pinned);
+    expect(now.y - from.y).toBeGreaterThan(0.7);
+    expect(now.y - pinned.y).toBeGreaterThan(0.5);
+  });
+
   it('finds what a lifted wing was covering', () => {
     const { piece } = foldedRecipe('plane');
     const wing = outer(piece, false);

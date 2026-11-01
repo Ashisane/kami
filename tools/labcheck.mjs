@@ -214,7 +214,7 @@ try {
   r = await lab();
   check('hovering the plane lights up the wing on top', r.hoverFaces > 20, `${r.hoverFaces} faces`);
   await shot('plane-hover');
-  // The lock tip shows at the nose, though the wing covers the rest of it.
+  // A layer shows at the nose, though the wing covers the rest of it.
   const nose = await (async () => {
     for (const [x, z] of [[-2.2, -0.4], [-2.4, -0.2], [-2.1, -0.6], [-2.6, 0], [-2.3, 0.2], [-2.05, -0.8]]) {
       const [sx, sy] = await screen(x, 0.1, z);
@@ -225,12 +225,13 @@ try {
     }
     return null;
   })();
-  check('hovering the nose lights up the lock tip, under the wing', nose !== null, nose ? `${nose[2]} faces` : 'nothing lit');
+  check('hovering the nose lights up the layer showing there', nose !== null, nose ? `${nose[2]} faces` : 'nothing lit');
   await shot('plane-tip-hover');
   if (nose) {
     await drag([nose[0], nose[1]], [nose[0] + 0.3, nose[1] - 1], { hold: 900, lift: 300, midShot: 'plane-tip-pulled' });
     r = await lab();
-    check('and the tip lifts on its own', r.liftedFaces > 0 && r.liftedFaces < 60, `${r.liftedFaces} faces, ${r.height.toFixed(2)} m`);
+    // With no pins near it this carries the nose along, as paper would: it counts faces, not height.
+    check('and that layer takes the pin, not the whole stack', r.liftedFaces > 0 && r.liftedFaces < 60, `${r.liftedFaces} faces`);
     await page.keyboard.press('Escape');
     await wait(700);
   }
@@ -274,7 +275,8 @@ try {
 
   // 7c. Lift the plane, reach under for the second wing, fix it, harden it.
   await page.locator('.btn', { hasText: 'Hold it up' }).click();
-  await wait(2000);
+  // Two hands make an axis, so the plane rolls under the open wing's weight before it settles.
+  await wait(3500);
   await shot('plane-lifted');
   r = await lab();
   check('two hands lift the plane off the bench', r.pins === 2 && r.height > 3, `${r.pins} pins, top ${r.height.toFixed(2)} m`);
@@ -282,10 +284,10 @@ try {
   await page.keyboard.down('Control');
   const [cx0, cy0] = await screen(-2.3, 2.6, 2.8);
   let found = null;
-  for (let dy = -160; dy <= 160 && !found; dy += 32) {
-    for (let dx = -140; dx <= 140 && !found; dx += 28) {
+  // It can hang almost edge-on to this camera, so the sweep has to be fine.
+  for (let dy = -170; dy <= 170 && !found; dy += 12) {
+    for (let dx = -140; dx <= 140 && !found; dx += 8) {
       await page.mouse.move(cx0 + dx, cy0 + dy);
-      await wait(50);
       if ((await lab()).hoverFaces > 50) found = [cx0 + dx, cy0 + dy];
     }
   }
