@@ -1,13 +1,15 @@
 import { BufferAttribute, BufferGeometry, DynamicDrawUsage, Group, Mesh } from 'three';
 import type { Material } from 'three';
 import type { SheetPiece } from '../fold/SheetPiece';
+import { cornerOffset } from '../fold/soft/softMesh';
 import { paper } from '../paper/paperLibrary';
 
 /**
  * Draws a piece of paper. The solver's triangles are big, so each is drawn as a
- * small curved patch, which lets a 0.5 m mesh drape smoothly. Only the outer
- * faces of a stack are drawn, since inner layers can only be seen at the edges,
- * where rims show them.
+ * small curved patch, which lets a 0.5 m mesh drape smoothly. Every layer sits
+ * at its true height, and only surfaces that can be seen are drawn: the outside
+ * of each run of touching layers, since inner layers show only at the edges,
+ * where rims close them off.
  */
 const DETAIL = 4;
 /** How strongly patches round off towards the surface the normals imply. */
@@ -199,18 +201,26 @@ export class SheetView {
       return map;
     };
 
-    const surface = (t: number, f: number, h: number, up: boolean) => {
+    /** Height of the middle of a face at each solver corner, in metres. */
+    const heightsOn = (f: number, t: number): [number, number, number] => {
+      const [c0, c1, c2] = cornersOn(f, t);
+      return [cornerOffset(sim, f, c0, thickness), cornerOffset(sim, f, c1, thickness), cornerOffset(sim, f, c2, thickness)];
+    };
+
+    const surface = (t: number, f: number, up: boolean) => {
       const printed = (book.flipped[f] === 1) !== up;
       const slot = printed ? 0 : 1;
       const first = patch.length;
       const [c0, c1, c2] = cornersOn(f, t);
+      const [h0, h1, h2] = heightsOn(f, t);
+      const skin = up ? thickness / 2 : -thickness / 2;
       const rest = (c: number, axis: number) => ((book.rest[f * 6 + c * 2 + axis] as number) - book.span / 2) * unit;
       for (let a = DETAIL; a >= 0; a--) {
         const row = DETAIL - a;
         for (let b = 0; b <= row; b++) {
           const w0 = a / DETAIL, w1 = b / DETAIL, w2 = 1 - w0 - w1;
           patch.push(t * PATCH_POINTS + patchIndex(a, b));
-          height.push(h);
+          height.push(w0 * h0 + w1 * h1 + w2 * h2 + skin);
           flip.push(up ? 1 : -1);
           uv.push(w0 * rest(c0, 0) + w1 * rest(c1, 0) + w2 * rest(c2, 0), w0 * rest(c0, 1) + w1 * rest(c1, 1) + w2 * rest(c2, 1));
         }
@@ -223,17 +233,23 @@ export class SheetView {
       }
     };
 
+    /** True if air can show between two layers of a stack. */
+    const gapBetween = (low: number, high: number, t: number) => {
+      const a = heightsOn(low, t), b = heightsOn(high, t);
+      return Math.max(b[0] - a[0], b[1] - a[1], b[2] - a[2]) > thickness * 1.02;
+    };
     stacks.forEach((stack, t) => {
-      if (stack.length === 0) return;
-      const n = stack.length;
-      surface(t, stack[n - 1] as number, (n * thickness) / 2, true);
-      surface(t, stack[0] as number, (-n * thickness) / 2, false);
+      stack.forEach((f, i) => {
+        const below = stack[i - 1], above = stack[i + 1];
+        if (below === undefined || gapBetween(below, f, t)) surface(t, f, false);
+        if (above === undefined || gapBetween(f, above, t)) surface(t, f, true);
+      });
     });
     this.rimStart = patch.length;
 
     // Cut edges, and the outside of creases, close the sheet off with a rim.
     const rims: number[] = [];
-    const rimSegment = (t: number, f: number, ka: number, kb: number, low: number, high: number, slot: number, sense: number) => {
+    const rimSegment = (t: number, { face: f, ka, kb, lowA, lowB, highA, highB, slot, sense }: RimPiece) => {
       for (let s = 0; s < DETAIL; s++) {
         const step = (i: number) => {
           const third = 3 - ka - kb;
@@ -246,14 +262,27 @@ export class SheetView {
         const a = t * PATCH_POINTS + step(s), b = t * PATCH_POINTS + step(s + 1);
         const first = patch.length;
         patch.push(a, b, b, a);
-        height.push(low, low, high, high);
+        const k0 = s / DETAIL, k1 = (s + 1) / DETAIL;
+        const low0 = lerp(lowA, lowB, k0), low1 = lerp(lowA, lowB, k1), high0 = lerp(highA, highB, k0), high1 = lerp(highA, highB, k1);
+        height.push(low0, low1, high1, high0);
         flip.push(1, 1, 1, 1);
         const u = (book.rest[f * 6] as number) * unit, w = (book.rest[f * 6 + 1] as number) * unit;
-        uv.push(u, low * 8 + w, u + 0.25, low * 8 + w, u + 0.25, high * 8 + w, u, high * 8 + w);
+        uv.push(u, low0 * 8 + w, u + 0.25, low1 * 8 + w, u + 0.25, high1 * 8 + w, u, high0 * 8 + w);
         if (sense > 0) (indices[slot] as number[]).push(first, first + 1, first + 2, first, first + 2, first + 3);
         else (indices[slot] as number[]).push(first, first + 2, first + 1, first, first + 3, first + 2);
         rims.push(a, b, sense);
       }
+    };
+
+    // Rims that share an edge sit on one plane, so only the outermost is drawn:
+    // a crease folded inside another is hidden by it, and would only flicker.
+    const pieces = new Map<number, RimPiece[]>();
+    const half = thickness / 2;
+    const wanted = (t: number, piece: RimPiece) => {
+      const key = t * 3 + Math.min(piece.ka, piece.kb) + Math.max(piece.ka, piece.kb) - 1;
+      const list = pieces.get(key);
+      if (list) list.push(piece);
+      else pieces.set(key, [piece]);
     };
 
     for (const f of book.faces) {
@@ -261,8 +290,6 @@ export class SheetView {
       const t = faceTri[f] as number;
       const stack = stacks[t] as number[];
       const layer = stack.indexOf(f);
-      const n = stack.length;
-      const centre = (layer - (n - 1) / 2) * thickness;
       for (let k = 0; k < 3; k++) {
         const va = cornerVertex[f * 3 + k] as number, vb = cornerVertex[f * 3 + (k + 1) % 3] as number;
         let ka = -1, kb = -1;
@@ -274,14 +301,26 @@ export class SheetView {
         const sense = (kb - ka + 3) % 3 === 1 ? 1 : -1;
         const g = book.neighbour[f * 3 + k] as number;
         const open = g < 0 || book.edgeBlocked(f, k) || hidden.has(g);
+        const onFace = heightsOn(f, t);
+        const lowA = (onFace[ka] as number) - half, lowB = (onFace[kb] as number) - half;
         if (open) {
-          rimSegment(t, f, ka, kb, centre - thickness / 2, centre + thickness / 2, 2, sense);
+          wanted(t, { face: f, ka, kb, lowA, lowB, highA: lowA + thickness, highB: lowB + thickness, slot: 2, sense });
         } else if (faceTri[g] === t && stack.indexOf(g) > layer) {
           // A crease wraps from this layer round to the one above: paint the wrap.
-          const other = (stack.indexOf(g) - (n - 1) / 2) * thickness;
+          const onOther = heightsOn(g, t);
           const slot = book.flipped[f] === 1 ? 0 : 1;
-          rimSegment(t, f, ka, kb, centre - thickness / 2, other + thickness / 2, slot, sense);
+          wanted(t, { face: f, ka, kb, lowA, lowB, highA: (onOther[ka] as number) + half, highB: (onOther[kb] as number) + half, slot, sense });
         }
+      }
+    }
+
+    for (const [key, list] of pieces) {
+      const t = Math.floor(key / 3);
+      const low = (p: RimPiece) => (p.lowA + p.lowB) / 2, high = (p: RimPiece) => (p.highA + p.highB) / 2;
+      for (const piece of list) {
+        const inside = list.some((other) => other !== piece && low(other) <= low(piece) + 1e-4 && high(other) >= high(piece) - 1e-4
+          && (high(other) - low(other) > high(piece) - low(piece) + 1e-4 || list.indexOf(other) < list.indexOf(piece)));
+        if (!inside) rimSegment(t, piece);
       }
     }
 
@@ -330,3 +369,19 @@ export class SheetView {
 }
 
 const NOTHING: ReadonlySet<number> = new Set();
+
+/** A stretch of rim up the side of a stack, not yet drawn. */
+interface RimPiece {
+  face: number;
+  ka: number;
+  kb: number;
+  /** Heights at each end of the edge. */
+  lowA: number;
+  lowB: number;
+  highA: number;
+  highB: number;
+  slot: number;
+  sense: number;
+}
+
+const lerp = (a: number, b: number, k: number): number => a + (b - a) * k;

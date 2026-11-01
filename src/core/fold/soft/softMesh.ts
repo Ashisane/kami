@@ -1,11 +1,15 @@
 import type { FoldBook } from '../FoldBook';
 import { UNITS_PER_CELL } from '../lattice';
+import { layerHeights } from '../levels';
 
 /**
  * The cloth the solver actually moves, derived from a Fold Book. Layers lying on
  * the same site merge into one triangle that is heavier and stiffer, so glued
  * layers never need collision. A sheet folded in half really is a half-size
  * cloth of double weight.
+ *
+ * The cloth is one surface through the middle of the paper's thickness, and
+ * `cornerHeight` says how far each real layer sits from it.
  *
  * `peeled` faces stay out of the merge, so a flap can lift away from the stack
  * while staying joined to it along its crease.
@@ -31,8 +35,12 @@ export interface SoftMesh {
   faceTri: Int32Array;
   /** Which vertex each face corner belongs to: index by face * 3 + corner. */
   cornerVertex: Int32Array;
-  /** Layers per vertex: the tallest stack it touches. */
-  vertexLayers: Int32Array;
+  /** True height of each face corner in layers: index by face * 3 + corner. */
+  cornerHeight: Float32Array;
+  /** Height of the paper from its lowest point to its highest, in layers. */
+  heightInLayers: number;
+  /** Layers of paper hanging below the cloth surface at each vertex. */
+  vertexDepth: Float64Array;
   /** Inverse mass, normalised so one layer's interior vertex is 1. */
   inverseMass: Float64Array;
 }
@@ -202,8 +210,16 @@ export function buildSoftMesh(book: FoldBook, size: number, peeled: ReadonlySet<
     }
   }
 
+  const { corner: cornerHeight, top: heightInLayers } = layerHeights(book);
+  const vertexDepth = new Float64Array(vertexCount).fill(-Infinity);
+  for (const f of book.faces) {
+    for (let k = 0; k < 3; k++) {
+      const v = cornerVertex[f * 3 + k] as number;
+      vertexDepth[v] = Math.max(vertexDepth[v] as number, heightInLayers / 2 - (cornerHeight[f * 3 + k] as number));
+    }
+  }
+
   const mass = new Float64Array(vertexCount);
-  const vertexLayers = new Int32Array(vertexCount);
   let reference = 0;
   for (let t = 0; t < triCount; t++) {
     const share = ((area[t] as number) * (triLayers[t] as number)) / 3;
@@ -211,7 +227,6 @@ export function buildSoftMesh(book: FoldBook, size: number, peeled: ReadonlySet<
     for (let k = 0; k < 3; k++) {
       const v = tris[t * 3 + k] as number;
       mass[v] = (mass[v] as number) + share;
-      vertexLayers[v] = Math.max(vertexLayers[v] as number, triLayers[t] as number);
     }
   }
   const inverseMass = mass.map((m) => (m > 0 ? reference / m : 0));
@@ -229,7 +244,13 @@ export function buildSoftMesh(book: FoldBook, size: number, peeled: ReadonlySet<
     hingeFolded: Uint8Array.from(hingeFoldedList),
     faceTri,
     cornerVertex,
-    vertexLayers,
+    cornerHeight,
+    heightInLayers,
+    vertexDepth,
     inverseMass,
   };
 }
+
+/** How far the middle of a face sits above the cloth surface at one corner, in metres. */
+export const cornerOffset = (mesh: SoftMesh, f: number, corner: number, thickness: number): number =>
+  ((mesh.cornerHeight[f * 3 + corner] as number) - (mesh.heightInLayers - 1) / 2) * thickness;

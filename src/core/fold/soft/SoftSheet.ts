@@ -22,7 +22,7 @@ export interface SoftSettings {
 export const DEFAULT_SOFT: SoftSettings = {
   substeps: 12,
   gravity: 9.8,
-  thickness: 0.03,
+  thickness: 0.01,
   floppiness: 0.25,
   airDrag: 1.4,
   friction: 0.8,
@@ -58,11 +58,17 @@ const BEND_LIMIT = 0.85;
 const HAND_SPEED = 7;
 /** Substeps between contact searches. */
 const CONTACT_INTERVAL = 6;
-/** Bending stiffness of a stack grows with the cube of its thickness, as a real beam's does. */
-const STACK_STIFFENING = 3;
+/**
+ * How fast a stack stiffens with its layers. Folded layers slide over each other,
+ * so a stack bends more like a pile of sheets (a power of 1) than a solid beam (3),
+ * and creases stiffen it a little beyond a pile. Measured, not guessed: see `sag`.
+ */
+const STACK_STIFFENING = 2;
 const PIN_STRENGTH = 0.7;
 const DAMPING = 0.998;
-/** Fastest a point may move per substep, in sheet thicknesses, so layers cannot pass through. */
+/** Space kept between loose sheets. Real paper is too thin for a solver to hold apart. */
+export const CONTACT_GAP = 0.03;
+/** Fastest a point may move per substep, as a share of the gap, so layers cannot pass through. */
 const MAX_TRAVEL = 0.45;
 
 const CONTACT_SAMPLES = [1 / 3, 1 / 3, 1 / 3, 0.5, 0.5, 0, 0, 0.5, 0.5, 0.5, 0, 0.5, 0.9, 0.05, 0.05, 0.05, 0.9, 0.05, 0.05, 0.05, 0.9];
@@ -118,7 +124,7 @@ export class SoftSheet {
 
     const { thickness } = this.settings;
     for (let i = 0; i < n; i++) {
-      this.groundHeight[i] = ((mesh.vertexLayers[i] as number) * thickness) / 2;
+      this.groundHeight[i] = (mesh.vertexDepth[i] as number) * thickness;
       if (!initial) {
         this.x[i * 3] = mesh.flat[i * 2] as number;
         this.x[i * 3 + 1] = this.groundHeight[i] as number;
@@ -256,7 +262,7 @@ export class SoftSheet {
 
   private integrate(h: number): void {
     const { x, v, p, w } = this;
-    const limit = (MAX_TRAVEL * this.settings.thickness) / h;
+    const limit = (MAX_TRAVEL * CONTACT_GAP) / h;
     const fall = this.settings.gravity * h;
     for (let i = 0; i < w.length; i++) {
       const j = i * 3;
@@ -347,8 +353,8 @@ export class SoftSheet {
       const sx = n1y * n2z - n1z * n2y, sy = n1z * n2x - n1x * n2z, sz = n1x * n2y - n1y * n2x;
       let angle = Math.atan2((sx * ex + sy * ey + sz * ez) / length, n1x * n2x + n1y * n2y + n1z * n2z);
       const previous = this.hingePrevious[n] as number;
-      while (angle - previous > Math.PI) angle -= Math.PI * 2;
-      while (angle - previous < -Math.PI) angle += Math.PI * 2;
+      // Unwrap past a half turn. A sum, not a loop, so bad numbers cannot hang the solver.
+      angle -= Math.round((angle - previous) / (Math.PI * 2)) * Math.PI * 2;
       this.hingePrevious[n] = angle;
 
       const k1 = -length / n1s, k2 = -length / n2s;
@@ -500,7 +506,7 @@ export class SoftSheet {
       const px = b0 * (x[p0] as number) + b1 * (x[p1] as number) + b2 * (x[p2] as number) - (x[a] as number);
       const py = b0 * (x[p0 + 1] as number) + b1 * (x[p1 + 1] as number) + b2 * (x[p2 + 1] as number) - (x[a + 1] as number);
       const pz = b0 * (x[p0 + 2] as number) + b1 * (x[p1 + 2] as number) + b2 * (x[p2 + 2] as number) - (x[a + 2] as number);
-      const gap = (thickness * ((triLayers[t] as number) + (triLayers[o] as number))) / 2;
+      const gap = CONTACT_GAP + (thickness * ((triLayers[t] as number) + (triLayers[o] as number))) / 2;
       const violation = side * (px * nx + py * ny + pz * nz) - gap;
       if (violation >= 0) continue;
       const d00 = abx * abx + aby * aby + abz * abz, d01 = abx * acx + aby * acy + abz * acz, d11 = acx * acx + acy * acy + acz * acz;

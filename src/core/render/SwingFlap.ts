@@ -3,6 +3,7 @@ import type { Group, Material } from 'three';
 import { fold as foldEase, spring } from '../anim/easing';
 import { paper } from '../paper/paperLibrary';
 import type { SheetPiece } from '../fold/SheetPiece';
+import { cornerOffset } from '../fold/soft/softMesh';
 
 const DROP_SECONDS = 0.38;
 const SWING_SECONDS = 0.8;
@@ -111,19 +112,21 @@ export class SwingFlap {
     if (this.axis) this.rotation.setFromAxisAngle(this.axis.direction, this.axis.angle * swingEase(k));
 
     const out = this.positions.array as Float32Array, normals = this.normals.array as Float32Array;
-    const place = (from: number, target: Vector3) => {
+    const { mesh } = this.piece.soft;
+    const place = (from: number, target: Vector3, height: number) => {
       target.set(this.from[from] as number, this.from[from + 1] as number, this.from[from + 2] as number);
       if (this.axis) target.sub(this.axis.origin).applyQuaternion(this.rotation).add(this.axis.origin);
       target.x += ((after[from] as number) - target.x) * blend;
-      target.y += ((after[from + 1] as number) - target.y) * blend;
+      target.y += ((after[from + 1] as number) + height - target.y) * blend;
       target.z += ((after[from + 2] as number) - target.z) * blend;
     };
 
     this.faces.forEach((f, i) => {
       const o = f * 9;
-      place(o, this.a);
-      place(o + 3, this.b);
-      place(o + 6, this.c);
+      // Lands on the layer it will really be, so nothing jumps at the handover.
+      place(o, this.a, cornerOffset(mesh, f, 0, thickness));
+      place(o + 3, this.b, cornerOffset(mesh, f, 1, thickness));
+      place(o + 6, this.c, cornerOffset(mesh, f, 2, thickness));
       this.n.copy(this.b).sub(this.a).cross(this.offset.copy(this.c).sub(this.a)).normalize();
       // Corners run the same way round as the flat sheet, so this points to the printed side.
       const sign = this.windingSign(f);

@@ -9,7 +9,7 @@ import type { MirrorLine } from './lattice';
 import { extractRotation, rotateInto } from './soft/rotation';
 import type { Quat } from './soft/rotation';
 import { buildSoftMesh, metresPerUnit } from './soft/softMesh';
-import { SoftSheet } from './soft/SoftSheet';
+import { CONTACT_GAP, SoftSheet } from './soft/SoftSheet';
 import type { SoftSettings } from './soft/SoftSheet';
 
 /**
@@ -230,9 +230,13 @@ export class SheetPiece {
   }
 
   /**
-   * Every face that lifts with this one. A flap turns on its longest crease, like
-   * the spine of a book, and anything folded into it on its other creases comes
-   * along. If that would be the whole piece, only the flat paper lifts.
+   * Every face that lifts with this one. A flap turns on one crease, like the
+   * spine of a book, and anything folded into it on its other creases comes along.
+   * A plane's wing is several separate layers tucked over each other, all turning
+   * on the same crease, and they lift as one.
+   * The longest crease that leaves the flap free to lift is the one it turns on.
+   * If nothing can lift, this answers with the longest crease's flap, or just the
+   * flat paper when that would be the whole piece.
    */
   flapOf(face: number): Set<number> {
     const { book } = this;
@@ -247,27 +251,76 @@ export class SheetPiece {
         crease.set(line, (crease.get(line) ?? 0) + 1);
       }
     }
-    let hinge = '';
-    let longest = 0;
-    for (const [line, length] of crease) {
-      if (length > longest) {
-        longest = length;
-        hinge = line;
+    let longest: Set<number> | null = null;
+    for (const [hinge] of [...crease].sort((a, b) => b[1] - a[1])) {
+      const flap = this.turningOn(face, hinge);
+      if (flap.size === book.faces.length) continue;
+      if (!this.heldDown(flap)) return flap;
+      longest ??= flap;
+    }
+    return longest ?? flat;
+  }
+
+  /**
+   * Everything that swings with a face when it turns on a line. Cutting the paper
+   * along the line splits it into parts. What the face is joined to across the line
+   * stays behind, and every other part lying on top of that swings too. Returns the
+   * whole piece if the line does not actually part the paper.
+   */
+  private turningOn(face: number, hinge: string): Set<number> {
+    const { book } = this;
+    const part = new Int32Array(book.faceCount).fill(-1);
+    let parts = 0;
+    for (const start of book.faces) {
+      if ((part[start] as number) >= 0) continue;
+      const id = parts++;
+      part[start] = id;
+      const todo = [start];
+      while (todo.length) {
+        const f = todo.pop() as number;
+        for (let k = 0; k < 3; k++) {
+          const g = book.neighbour[f * 3 + k] as number;
+          if (g < 0 || (part[g] as number) >= 0 || book.edgeBlocked(f, k) || this.edgeLine(f, k) === hinge) continue;
+          part[g] = id;
+          todo.push(g);
+        }
       }
     }
 
-    const flap = new Set(flat);
-    const todo = [...flat];
-    while (todo.length) {
-      const f = todo.pop() as number;
-      for (let k = 0; k < 3; k++) {
-        const g = book.neighbour[f * 3 + k] as number;
-        if (g < 0 || flap.has(g) || book.edgeBlocked(f, k) || this.edgeLine(f, k) === hinge) continue;
-        flap.add(g);
-        todo.push(g);
+    const swinging = new Set([part[face] as number]);
+    const staying = new Set<number>();
+    for (let grew = true; grew; ) {
+      grew = false;
+      for (const f of book.faces) {
+        if (!swinging.has(part[f] as number)) continue;
+        for (let k = 0; k < 3; k++) {
+          const g = book.neighbour[f * 3 + k] as number;
+          if (g >= 0 && !book.edgeBlocked(f, k) && part[g] !== part[f]) staying.add(part[g] as number);
+        }
+      }
+      for (const stack of book.stacks.values()) {
+        let aboveStaying = false;
+        for (const f of stack) {
+          const p = part[f] as number;
+          if (staying.has(p)) aboveStaying = true;
+          else if (aboveStaying && !swinging.has(p)) {
+            swinging.add(p);
+            grew = true;
+          }
+        }
       }
     }
-    return flap.size === book.faces.length ? flat : flap;
+    if ([...swinging].some((p) => staying.has(p))) return new Set(book.faces);
+    return new Set(book.faces.filter((f) => swinging.has(part[f] as number)));
+  }
+
+  /** True if another layer is lying on top of any part of this paper. */
+  private heldDown(flap: ReadonlySet<number>): boolean {
+    for (const f of flap) {
+      const stack = this.book.stackOf(f);
+      if (stack.slice(stack.indexOf(f) + 1).some((g) => !flap.has(g))) return true;
+    }
+    return false;
   }
 
   /** Faces currently lifted off their stack. */
@@ -276,21 +329,23 @@ export class SheetPiece {
   }
 
   /**
-   * Lifts a flap off the stack so it can be folded alone. Refused if the flap is
-   * the whole piece, or if another layer is lying on top of any part of it.
+   * The flap that pulling this face would lift, or null if none can: not when it
+   * is the whole piece, nor when another layer is lying on top of any part of it.
    */
-  peel(face: number): boolean {
+  flapToLift(face: number): Set<number> | null {
     const flap = this.flapOf(face);
-    if (flap.size === this.book.faces.length) return false;
-    for (const f of flap) {
-      const stack = this.book.stackOf(f);
-      if (stack.slice(stack.indexOf(f) + 1).some((g) => !flap.has(g))) return false;
-    }
-    if (![...flap].some((f) => this.book.depth(f) > 1)) return false;
+    if (flap.size === this.book.faces.length || this.heldDown(flap)) return null;
+    return [...flap].some((f) => this.book.depth(f) > 1) ? flap : null;
+  }
+
+  /** Lifts a flap off the stack so it can be folded alone. */
+  peel(face: number): boolean {
+    const flap = this.flapToLift(face);
+    if (!flap) return false;
 
     const before = this.corners();
     this.peeled = flap;
-    const lift = this.definition.thickness * 1.5;
+    const lift = CONTACT_GAP * 1.5;
     this.rebuild((mesh) => {
       const out = new Float64Array(mesh.vertexCount * 3);
       for (const f of this.book.faces) {

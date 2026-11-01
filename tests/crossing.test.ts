@@ -6,7 +6,7 @@ import type { Pin } from '@/core/fold/soft/SoftSheet';
 
 const sheet: SheetDefinition = {
   id: 'sheet.test', name: 'Test', description: '', size: 10, cells: 20,
-  top: 'vermilion', bottom: 'washi', edge: 'washi', thickness: 0.03, density: 0.4, floppiness: 0.25,
+  top: 'vermilion', bottom: 'washi', edge: 'washi', thickness: 0.01, density: 0.4, floppiness: 0.25,
 };
 const DT = 1 / 60;
 

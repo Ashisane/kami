@@ -1,6 +1,7 @@
-import { CircleGeometry, Color, ConeGeometry, DoubleSide, Group, InstancedMesh, Matrix4, Mesh, MeshBasicMaterial, PlaneGeometry, Quaternion, RingGeometry, Vector3 } from 'three';
+import { BufferAttribute, BufferGeometry, CircleGeometry, Color, ConeGeometry, DoubleSide, Group, InstancedMesh, LineBasicMaterial, LineSegments, Matrix4, Mesh, MeshBasicMaterial, PlaneGeometry, Quaternion, RingGeometry, Vector3 } from 'three';
 import type { Scene } from 'three';
 import { Spring } from '@/core/anim/spring';
+import type { SoftMesh } from '@/core/fold/soft/softMesh';
 
 export const PIN_COLOURS = ['#ff5a3c', '#ffc23d', '#18d6b4'] as const;
 const GOOD = new Color('#ffc23d');
@@ -43,6 +44,99 @@ export class PinMarker {
   dispose(): void {
     this.group.removeFromParent();
   }
+}
+
+const HINT_FILL = 0.22;
+const HINT_EDGE = 0.95;
+
+/**
+ * Lights up the flap that would lift if the paper under the pointer were pulled.
+ * Layers are too thin to tell apart by eye, so the paper says which one you mean.
+ */
+export class FlapHint {
+  readonly group = new Group();
+  private readonly fillMaterial = new MeshBasicMaterial({ color: GOOD, transparent: true, opacity: 0, side: DoubleSide, depthWrite: false });
+  private readonly edgeMaterial = new LineBasicMaterial({ color: GOOD, transparent: true, opacity: 0 });
+  private readonly fill = new Mesh(new BufferGeometry(), this.fillMaterial);
+  private readonly edge = new LineSegments(new BufferGeometry(), this.edgeMaterial);
+  private readonly glow = new Spring(0, 5, 0.55);
+  /** Solver vertices of the flap's triangles, then of its outline. */
+  private fillVertices = new Int32Array(0);
+  private edgeVertices = new Int32Array(0);
+
+  constructor(scene: Scene) {
+    this.fill.frustumCulled = false;
+    this.edge.frustumCulled = false;
+    this.group.add(this.fill, this.edge);
+    this.group.visible = false;
+    scene.add(this.group);
+  }
+
+  /** Lights a new flap. Folded paper merges, so each solver triangle is drawn once. */
+  show(mesh: SoftMesh, faces: ReadonlySet<number>): void {
+    const tris = new Set<number>();
+    for (const f of faces) tris.add(mesh.faceTri[f] as number);
+    const outline = new Map<number, [number, number, number]>();
+    const fill: number[] = [];
+    for (const t of tris) {
+      for (let k = 0; k < 3; k++) {
+        const a = mesh.tris[t * 3 + k] as number, b = mesh.tris[t * 3 + (k + 1) % 3] as number;
+        fill.push(a);
+        const key = Math.min(a, b) * mesh.vertexCount + Math.max(a, b);
+        const seen = outline.get(key);
+        if (seen) seen[2]++;
+        else outline.set(key, [a, b, 1]);
+      }
+    }
+    const edges: number[] = [];
+    for (const [a, b, count] of outline.values()) if (count === 1) edges.push(a, b);
+    this.fillVertices = Int32Array.from(fill);
+    this.edgeVertices = Int32Array.from(edges);
+    this.fill.geometry.setAttribute('position', new BufferAttribute(new Float32Array(fill.length * 3), 3));
+    this.edge.geometry.setAttribute('position', new BufferAttribute(new Float32Array(edges.length * 3), 3));
+    this.glow.target = 1;
+    this.glow.kick(3);
+    this.group.visible = true;
+  }
+
+  hide(): void {
+    this.glow.target = 0;
+  }
+
+  /** Drops the hint at once: the paper it pointed at no longer exists. */
+  clear(): void {
+    this.glow.snap(0);
+    this.group.visible = false;
+  }
+
+  update(dt: number, x: Float64Array | null): void {
+    if (!this.group.visible) return;
+    const glow = Math.max(0, this.glow.update(dt));
+    if (this.glow.target === 0 && this.glow.settled) this.group.visible = false;
+    this.fillMaterial.opacity = HINT_FILL * glow;
+    this.edgeMaterial.opacity = Math.min(1, HINT_EDGE * glow);
+    if (!x) return;
+    write(this.fill.geometry, this.fillVertices, x);
+    write(this.edge.geometry, this.edgeVertices, x);
+  }
+
+  dispose(): void {
+    this.fill.geometry.dispose();
+    this.edge.geometry.dispose();
+    this.group.removeFromParent();
+  }
+}
+
+function write(geometry: BufferGeometry, vertices: Int32Array, x: Float64Array): void {
+  const position = geometry.getAttribute('position') as BufferAttribute;
+  const out = position.array as Float32Array;
+  for (let i = 0; i < vertices.length; i++) {
+    const v = (vertices[i] as number) * 3;
+    out[i * 3] = x[v] as number;
+    out[i * 3 + 1] = x[v + 1] as number;
+    out[i * 3 + 2] = x[v + 2] as number;
+  }
+  position.needsUpdate = true;
 }
 
 /** The line a fold would crease along, and where the held point would land. */

@@ -213,8 +213,8 @@ export const RECIPES: readonly Recipe[] = [
       fold('New right corner to the centre line', 'diff', -1, 1, 'all'),
       fold('Fold the tip up over them: the Nakamura lock', 'z', 7, 1, 'top', { hold: [3, 7.6] }),
       fold('Fold in half behind, with the flaps outside', 'x', 3, 1, 'all', { landing: { kind: 'under' } }),
-      fold('Fold the top wing down', 'x', 2, -1, 'all', { from: { axis: 'x', max: 3 } }),
-      fold('Fold the other wing down', 'x', 2, -1, 'all', { from: { axis: 'x', min: 3 }, landing: { kind: 'under' } }),
+      fold('Fold the top wing down', 'x', 1.5, -1, 'all', { from: { axis: 'x', max: 3 } }),
+      fold('Fold the other wing down', 'x', 1.5, -1, 'all', { from: { axis: 'x', min: 3 }, landing: { kind: 'under' } }),
     ],
   },
   {

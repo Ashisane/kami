@@ -5,10 +5,12 @@ import type { LineKind, MirrorLine } from '@/core/fold/lattice';
 import { SheetPiece } from '@/core/fold/SheetPiece';
 import { buildSoftMesh } from '@/core/fold/soft/softMesh';
 import { FoldBook } from '@/core/fold/FoldBook';
+import { foldRequest, RECIPES } from '@/core/fold/recipes';
+import type { Recipe } from '@/core/fold/recipes';
 
 const sheet: SheetDefinition = {
   id: 'sheet.test', name: 'Test', description: '', size: 10, cells: 20,
-  top: 'vermilion', bottom: 'washi', edge: 'washi', thickness: 0.03, density: 0.4, floppiness: 0.25,
+  top: 'vermilion', bottom: 'washi', edge: 'washi', thickness: 0.01, density: 0.4, floppiness: 0.25,
 };
 const m = (metres: number) => metres * 2 * U;
 const line = (kind: LineKind, metres: number): MirrorLine => ({ kind, c: m(metres) });
@@ -114,6 +116,28 @@ describe('cloth', () => {
   });
 });
 
+/** How far the free end of a long strip sags, with its other end clamped high up. */
+const sag = (folds: number) => {
+  const piece = new SheetPiece(sheet);
+  if (folds > 0) foldAll(piece, line('z', 5), 1);
+  if (folds > 1) foldAll(piece, line('z', 2.5), 1);
+  const { soft } = piece;
+  const CLAMP_HEIGHT = 12;
+  for (let t = 0; t < soft.mesh.triCount; t++) {
+    for (let k = 0; k < 3; k++) {
+      const v = soft.mesh.tris[t * 3 + k] as number;
+      if ((soft.mesh.flat[v * 2] as number) > -3.9) continue;
+      const pin = soft.addPin(t, k === 0 ? 1 : 0, k === 1 ? 1 : 0, k === 2 ? 1 : 0);
+      soft.pinPoint(pin, pin);
+      pin.y = CLAMP_HEIGHT;
+    }
+  }
+  run(piece, 360);
+  let low = Infinity;
+  for (let i = 1; i < soft.x.length; i += 3) low = Math.min(low, soft.x[i] as number);
+  return CLAMP_HEIGHT - low;
+};
+
 describe('folded paper in the solver', () => {
   it('rebuilds from the Book and lands flat, two layers thick', () => {
     const piece = new SheetPiece(sheet);
@@ -133,32 +157,13 @@ describe('folded paper in the solver', () => {
     expect(maxX).toBeLessThan(0.1);
   });
 
-  it('droops less the more it is folded', () => {
-    const droop = (folds: number) => {
-      const piece = new SheetPiece(sheet);
-      if (folds > 0) foldAll(piece, line('x', 5), 1);
-      if (folds > 1) foldAll(piece, line('z', 5), 1);
-      const { soft } = piece;
-      // Hold the whole left edge up and let the far side hang.
-      const pins = [];
-      for (let t = 0; t < soft.mesh.triCount; t++) {
-        const v = soft.mesh.tris[t * 3] as number;
-        if ((soft.mesh.flat[v * 2] as number) < -4.9) {
-          const pin = soft.addPin(t, 1, 0, 0);
-          soft.pinPoint(pin, pin);
-          pin.y = 4;
-          pins.push(pin);
-        }
-      }
-      run(piece, 150);
-      let low = Infinity, high = -Infinity;
-      for (let i = 1; i < soft.x.length; i += 3) {
-        low = Math.min(low, soft.x[i] as number);
-        high = Math.max(high, soft.x[i] as number);
-      }
-      return high - low;
-    };
-    expect(droop(2)).toBeLessThan(droop(0));
+  it('sags less the more it is folded, but never turns to board', () => {
+    const [flat, twoLayers, fourLayers] = [sag(0), sag(1), sag(2)] as [number, number, number];
+    console.log('sag in metres over 6 m of strip', flat.toFixed(2), twoLayers.toFixed(2), fourLayers.toFixed(2));
+    expect(twoLayers).toBeLessThan(flat);
+    expect(fourLayers).toBeLessThan(twoLayers);
+    expect(fourLayers).toBeLessThan(flat - 0.3);
+    expect(fourLayers).toBeGreaterThan(flat * 0.8);
   });
 
   it('lifts a flap off its stack, then lets it fall back', () => {
@@ -194,6 +199,27 @@ describe('folded paper in the solver', () => {
       if (soft.mesh.hingeFolded[h]) widest = Math.max(widest, Math.PI - Math.abs(soft.angleAt(h)));
     }
     expect(widest).toBeLessThan(0.6);
+  });
+
+  it('turns a plane\'s wing on its fold, not on a small lock crease', () => {
+    let piece = new SheetPiece(sheet);
+    const plane = RECIPES.find((r) => r.id === 'plane') as Recipe;
+    let wing = new Set<number>();
+    for (const step of plane.steps) {
+      if (step.action === 'trim') {
+        const pieces = piece.cut({ kind: step.kind, c: step.at * 2 * U }, step.from * 2 * U, step.to * 2 * U);
+        piece = pieces.reduce((a, b) => (b.book.faces.length > a.book.faces.length ? b : a));
+      } else if (step.action === 'fold') {
+        const plan = piece.fold(foldRequest(piece.book, 10, step));
+        expect(plan.failure).toBeNull();
+        if (step.label === 'Fold the top wing down') wing = new Set(plan.moved);
+      }
+    }
+    const { book } = piece;
+    // Wherever the wing is the top of the stack, lifting it takes exactly what its fold moved.
+    const tops = [...wing].filter((f) => book.stackOf(f).at(-1) === f);
+    expect(tops.length).toBeGreaterThan(20);
+    for (const top of tops) expect(piece.flapToLift(top)).toEqual(wing);
   });
 
   it('refuses to peel a flap with another layer on top of it', () => {

@@ -18,7 +18,7 @@ import type { Shake } from '@/core/fx/Shake';
 import { SheetView } from '@/core/render/SheetView';
 import { SwingFlap } from '@/core/render/SwingFlap';
 import { FixedStep } from '@/core/sim/FixedStep';
-import { FoldGhost, PIN_COLOURS, PinMarker } from './LabMarkers';
+import { FlapHint, FoldGhost, PIN_COLOURS, PinMarker } from './LabMarkers';
 
 const MAX_PINS = 3;
 /** How close the held point must be to its landing for a drop to crease. */
@@ -94,6 +94,10 @@ export interface LabReadout {
   floppiness: number;
   /** How far the paper rises off the ground, in metres. */
   height: number;
+  /** Faces lit up under the pointer, ready to lift. */
+  hoverFaces: number;
+  /** Faces lifted off their stack right now. */
+  liftedFaces: number;
   /** The pin that would fold if dropped, and whether it would succeed. */
   held: { x: number; y: number; z: number; ready: boolean } | null;
   recipe: { recipe: Recipe; next: number } | null;
@@ -117,6 +121,9 @@ export class FoldLab {
 
   private readonly clock = new FixedStep();
   private readonly ghost: FoldGhost;
+  private readonly hint: FlapHint;
+  /** The flap lit up under the pointer. */
+  private hover: { bench: Bench; face: number; size: number; revision: number } | null = null;
   private readonly raycaster = new Raycaster();
   private readonly pointer = new Vector2();
   private readonly dragPlane = new Plane(new Vector3(0, 1, 0), -DRAG_PLANE_HEIGHT);
@@ -144,6 +151,7 @@ export class FoldLab {
   ) {
     scene.add(this.group);
     this.ghost = new FoldGhost(overlay);
+    this.hint = new FlapHint(overlay);
     this.addBench(new SheetPiece(definition));
     canvas.addEventListener('pointerdown', this.onDown);
     window.addEventListener('pointermove', this.onMove);
@@ -177,6 +185,7 @@ export class FoldLab {
   }
 
   private clearBenches(): void {
+    this.clearHover();
     for (const bench of [...this.benches]) this.removeBench(bench);
     this.dragging = null;
     this.active = null;
@@ -186,6 +195,7 @@ export class FoldLab {
   dispose(): void {
     this.clearBenches();
     this.ghost.group.removeFromParent();
+    this.hint.dispose();
     this.group.removeFromParent();
     this.canvas.removeEventListener('pointerdown', this.onDown);
     window.removeEventListener('pointermove', this.onMove);
@@ -260,6 +270,7 @@ export class FoldLab {
   private readonly onDown = (event: PointerEvent): void => {
     if (event.button !== 0 || this.flapsBusy()) return;
     this.ray(event);
+    this.fadeHover();
     if (this.tool === 'cut') {
       const hit = this.pick();
       if (!hit) return;
@@ -295,7 +306,10 @@ export class FoldLab {
       return;
     }
     const grip = this.dragging;
-    if (!grip || !this.press) return;
+    if (!grip || !this.press) {
+      this.updateHover(event);
+      return;
+    }
     if (!this.press.moved) {
       if (Math.hypot(event.clientX - this.press.x, event.clientY - this.press.y) < DRAG_START) return;
       this.press.moved = true;
@@ -362,6 +376,51 @@ export class FoldLab {
     if (press.moved) this.setMessage('Holding. Click the pin to drop it and crease, or right click to let it fall.');
     else this.setMessage('Pinned.');
   };
+
+  // ---- Showing what the pointer would take hold of ----
+
+  private updateHover(event: PointerEvent): void {
+    if (event.buttons !== 0 || event.target !== this.canvas || this.tool !== 'fold' || this.hardened || this.flapsBusy()) {
+      this.fadeHover();
+      return;
+    }
+    this.ray(event);
+    const hit = this.markerUnderPointer() ? null : this.pick();
+    const face = hit?.fromAbove && hit.bench.piece.lifted.size === 0 ? this.faceOn(hit.bench, hit.tri, true) : -1;
+    if (!hit || face < 0) {
+      this.fadeHover();
+      return;
+    }
+    const { hover } = this;
+    if (hover?.bench === hit.bench && hover.face === face) return;
+    const flap = hit.bench.piece.flapToLift(face);
+    if (!flap) {
+      this.fadeHover();
+      return;
+    }
+    const { piece } = hit.bench;
+    // Anything on this flap lights up with it, so moving across it stays calm.
+    if (hover?.bench === hit.bench && hover.size === flap.size && flap.has(hover.face)) {
+      hover.face = face;
+      return;
+    }
+    this.hover = { bench: hit.bench, face, size: flap.size, revision: piece.revision };
+    this.hint.show(piece.soft.mesh, flap);
+    this.canvas.style.cursor = 'grab';
+  }
+
+  private fadeHover(): void {
+    if (!this.hover) return;
+    this.hover = null;
+    this.hint.hide();
+    this.canvas.style.cursor = '';
+  }
+
+  private clearHover(): void {
+    this.hover = null;
+    this.hint.clear();
+    this.canvas.style.cursor = '';
+  }
 
   // ---- Holding paper ----
 
@@ -887,6 +946,9 @@ export class FoldLab {
     if (this.tool === 'cut' && this.cutFrom) this.showCutGuide(dt);
     else this.updateGuide(dt);
     for (const bench of this.benches) bench.view.update(bench.flap.hidden);
+    const { hover } = this;
+    if (hover && hover.bench.piece.revision !== hover.revision) this.clearHover();
+    this.hint.update(dt, this.hover?.bench.piece.soft.x ?? null);
     for (const grip of this.grips) {
       grip.marker.group.position.set(grip.pin.heldX, grip.pin.heldY, grip.pin.heldZ);
       grip.marker.update(dt, this.camera);
@@ -962,6 +1024,8 @@ export class FoldLab {
       cellMetres: this.definition.size / this.definition.cells,
       floppiness: this.definition.floppiness,
       height: this.height(),
+      hoverFaces: this.hover?.size ?? 0,
+      liftedFaces: this.benches.reduce((sum, b) => sum + b.piece.lifted.size, 0),
       held: active ? { x: active.pin.heldX, y: active.pin.heldY, z: active.pin.heldZ, ready: assessment?.reachable ?? false } : null,
       recipe: this.recipe,
     };

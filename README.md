@@ -12,6 +12,7 @@ Opens the Fold Lab at http://localhost:5173.
 
 | In the Fold Lab | Action |
 | --- | --- |
+| Hover paper | Lights up the flap you would lift |
 | Click paper | Pin it in place (three pins) |
 | Drag paper | Pull it over. It stays held |
 | Click the pin, or Space | Drop it: crease on the guide |

@@ -89,6 +89,7 @@ export function foldPanel({ stage }: LibraryContext): HTMLElement {
         {},
         h('li', {}, h('strong', {}, 'Drag'), h('span', {}, 'pull paper over; it stays held')),
         h('li', {}, h('strong', {}, 'Click the pin, or Space'), h('span', {}, 'drop it, and it creases on the guide')),
+        h('li', {}, h('strong', {}, 'Hover'), h('span', {}, 'lights up the flap you would lift')),
         h('li', {}, h('strong', {}, 'Click paper'), h('span', {}, 'pin it in place')),
         h('li', {}, h('strong', {}, 'Right click a pin'), h('span', {}, 'let go with no crease')),
         h('li', {}, h('strong', {}, 'Wheel'), h('span', {}, 'raise or lower while dragging')),

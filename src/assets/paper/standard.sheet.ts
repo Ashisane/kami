@@ -9,7 +9,7 @@ export default defineSheet({
   top: 'vermilion',
   bottom: 'washi',
   edge: 'washi',
-  thickness: 0.03,
+  thickness: 0.01,
   density: 0.4,
   floppiness: 0.25,
 });
