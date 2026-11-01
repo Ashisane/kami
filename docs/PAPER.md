@@ -109,6 +109,12 @@ while: a pull on the wing raised the whole plane, and the height looked right.
 
 Layers are too thin to tell apart by eye, so hovering lights up the flap first.
 
+Anything that shows can be taken hold of. When no whole flap is free, because part
+of it is tucked under something, `flapToLift` falls back to the part that can be
+seen, and that bends away from whatever covers it. The Book only hears about it if
+the pin is dropped, and refuses a fold that would jam. A lifted layer covers nothing,
+so opening a wing exposes what was under it.
+
 ## How high layers sit
 
 `layerHeights` gives every corner of every face a true height. The cloth is one
@@ -125,6 +131,10 @@ height per flat plate was closer, but the nose then propped the tail wide open. 
 slope limit is what makes a wedge: thick at the nose, pinched at the tail.
 
 Nested creases share one plane at the fold, so only the outermost rim is drawn.
+
+Paper this thin has no spare height. The solver keeps its points on the table, but
+rounding curves the surface between them, so `SheetView` clamps that surface too. The
+mat also sits back in depth, or a far camera could not tell paper from it.
 
 ## Thickness and stiffness
 
@@ -146,7 +156,8 @@ flaps can be open at once: `buildSoftMesh` takes them as a list, so two wings on
 crease stay apart instead of welding together.
 
 A plane lies on one wing, so that wing cannot open against the bench. Hold it up
-first, then Ctrl reaches it. The third pin is free for that, since two hold the body.
+first, then Ctrl reaches it, straight through any flap already open. The third pin is
+free for that, since two hold the body.
 
 A flap has its own surface normals. Shared across a crease, the normals of two
 opposed wings cancel, and the top and bottom of each wing collapse together there.

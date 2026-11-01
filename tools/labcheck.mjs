@@ -112,6 +112,25 @@ try {
   await page.keyboard.press('Escape');
   await wait(500);
 
+  // Paper resting beside a lifted corner must never be drawn under the table.
+  await page.keyboard.press('r');
+  await wait(400);
+  await drag([-4.8, -4.8], [-3, -3], { hold: 900, lift: 900, midShot: 'corner-lifted' });
+  r = await lab();
+  check('a lifted corner leaves no paper under the table', r.lowest >= 0, `lowest ${r.lowest.toFixed(4)} m`);
+  await page.keyboard.press('Escape');
+  await wait(500);
+  await page.keyboard.press('r');
+  await wait(400);
+  await pin(4.6, -4.6);
+  await pin(4.6, 4.6);
+  await drag([-4.8, 0.3], [4.8, 0.3], { hold: 900 });
+  await wait(500);
+  await page.keyboard.press('Space');
+  await wait(1200);
+  await page.keyboard.press('Escape');
+  await wait(500);
+
   // 2. Right click lets go with no crease.
   await drag([4.8, 3], [3.2, 2], { hold: 300, midShot: 'held-up' });
   await wait(300);
@@ -195,6 +214,28 @@ try {
   r = await lab();
   check('hovering the plane lights up the wing on top', r.hoverFaces > 20, `${r.hoverFaces} faces`);
   await shot('plane-hover');
+  // The lock tip shows at the nose, though the wing covers the rest of it.
+  const nose = await (async () => {
+    for (const [x, z] of [[-2.2, -0.4], [-2.4, -0.2], [-2.1, -0.6], [-2.6, 0], [-2.3, 0.2], [-2.05, -0.8]]) {
+      const [sx, sy] = await screen(x, 0.1, z);
+      await page.mouse.move(sx, sy);
+      await wait(200);
+      const seen = (await lab()).hoverFaces;
+      if (seen > 0 && seen !== 112) return [x, z, seen];
+    }
+    return null;
+  })();
+  check('hovering the nose lights up the lock tip, under the wing', nose !== null, nose ? `${nose[2]} faces` : 'nothing lit');
+  await shot('plane-tip-hover');
+  if (nose) {
+    await drag([nose[0], nose[1]], [nose[0] + 0.3, nose[1] - 1], { hold: 900, lift: 300, midShot: 'plane-tip-pulled' });
+    r = await lab();
+    check('and the tip lifts on its own', r.liftedFaces > 0 && r.liftedFaces < 60, `${r.liftedFaces} faces, ${r.height.toFixed(2)} m`);
+    await page.keyboard.press('Escape');
+    await wait(700);
+  }
+  await page.mouse.move(wx, wy);
+  await wait(300);
   await page.keyboard.down('Control');
   await page.mouse.move(wx + 3, wy + 2);
   await wait(450);
@@ -241,12 +282,11 @@ try {
   await page.keyboard.down('Control');
   const [cx0, cy0] = await screen(-2.3, 2.6, 2.8);
   let found = null;
-  for (const [dx, dy] of [[0, 0], [30, 0], [-30, 0], [0, 30], [30, 30], [-30, 30], [60, 20], [0, 60], [60, 60], [90, 40]]) {
-    await page.mouse.move(cx0 + dx, cy0 + dy);
-    await wait(160);
-    if ((await lab()).hoverFaces > 50) {
-      found = [cx0 + dx, cy0 + dy];
-      break;
+  for (let dy = -160; dy <= 160 && !found; dy += 32) {
+    for (let dx = -140; dx <= 140 && !found; dx += 28) {
+      await page.mouse.move(cx0 + dx, cy0 + dy);
+      await wait(50);
+      if ((await lab()).hoverFaces > 50) found = [cx0 + dx, cy0 + dy];
     }
   }
   check('Ctrl finds the wing underneath while it is held up', found !== null, found ? 'lit up' : 'nothing lit up');

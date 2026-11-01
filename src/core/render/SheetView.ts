@@ -99,12 +99,18 @@ export class SheetView {
 
     const rounding = soft.hardened ? 0 : ROUNDING;
     const P = this.patchPosition, N = this.patchNormal;
+    const { vertexDepth } = mesh;
+    const { thickness } = soft.settings;
     let o = 0;
     for (let t = 0; t < triCount; t++) {
       const i0 = (tris[t * 3] as number) * 3, i1 = (tris[t * 3 + 1] as number) * 3, i2 = (tris[t * 3 + 2] as number) * 3;
       const x0 = x[i0] as number, y0 = x[i0 + 1] as number, z0 = x[i0 + 2] as number;
       const x1 = x[i1] as number, y1 = x[i1 + 1] as number, z1 = x[i1 + 2] as number;
       const x2 = x[i2] as number, y2 = x[i2 + 1] as number, z2 = x[i2 + 2] as number;
+      // The solver only keeps corners off the table, and rounding can dip between them.
+      const floor0 = (vertexDepth[tris[t * 3] as number] as number) * thickness;
+      const floor1 = (vertexDepth[tris[t * 3 + 1] as number] as number) * thickness;
+      const floor2 = (vertexDepth[tris[t * 3 + 2] as number] as number) * thickness;
       const c0 = (corner[t * 3] as number) * 3, c1 = (corner[t * 3 + 1] as number) * 3, c2 = (corner[t * 3 + 2] as number) * 3;
       const n0x = normal[c0] as number, n0y = normal[c0 + 1] as number, n0z = normal[c0 + 2] as number;
       const n1x = normal[c1] as number, n1y = normal[c1 + 1] as number, n1z = normal[c1 + 2] as number;
@@ -119,7 +125,7 @@ export class SheetView {
           const d1 = (px - x1) * n1x + (py - y1) * n1y + (pz - z1) * n1z;
           const d2 = (px - x2) * n2x + (py - y2) * n2y + (pz - z2) * n2z;
           P[o] = px - rounding * (w0 * d0 * n0x + w1 * d1 * n1x + w2 * d2 * n2x);
-          P[o + 1] = py - rounding * (w0 * d0 * n0y + w1 * d1 * n1y + w2 * d2 * n2y);
+          P[o + 1] = Math.max(py - rounding * (w0 * d0 * n0y + w1 * d1 * n1y + w2 * d2 * n2y), w0 * floor0 + w1 * floor1 + w2 * floor2);
           P[o + 2] = pz - rounding * (w0 * d0 * n0z + w1 * d1 * n1z + w2 * d2 * n2z);
           const nx = w0 * n0x + w1 * n1x + w2 * n2x, ny = w0 * n0y + w1 * n1y + w2 * n2y, nz = w0 * n0z + w1 * n1z + w2 * n2z;
           const length = Math.hypot(nx, ny, nz) || 1;
@@ -375,6 +381,14 @@ export class SheetView {
   dispose(): void {
     this.mesh?.geometry.dispose();
     this.group.removeFromParent();
+  }
+
+  /** The lowest point drawn, so a check can see paper is not under the table. */
+  get lowest(): number {
+    const y = this.positions.array;
+    let low = Infinity;
+    for (let i = 1; i < y.length; i += 3) low = Math.min(low, y[i] as number);
+    return low;
   }
 
   /** Vertices drawn right now, for the status display. */

@@ -279,7 +279,7 @@ export class SheetPiece {
    * piece if the line does not actually part the paper.
    */
   private turningOn(face: number, hinge: string, under: boolean): Set<number> {
-    const { book } = this;
+    const { book, lifted } = this;
     const part = new Int32Array(book.faceCount).fill(-1);
     let parts = 0;
     for (const start of book.faces) {
@@ -313,7 +313,9 @@ export class SheetPiece {
         if (!stack.some((f) => staying.has(part[f] as number))) continue;
         // In from the outside, up to the first layer that stays.
         for (let i = 0; i < stack.length; i++) {
-          const p = part[stack[under ? i : stack.length - 1 - i] as number] as number;
+          const f = stack[under ? i : stack.length - 1 - i] as number;
+          if (lifted.has(f)) continue;
+          const p = part[f] as number;
           if (staying.has(p)) break;
           if (!swinging.has(p)) {
             swinging.add(p);
@@ -326,27 +328,58 @@ export class SheetPiece {
     return new Set(book.faces.filter((f) => swinging.has(part[f] as number)));
   }
 
-  /** True if another layer is lying on the outside of any part of this paper. */
+  /** True if another layer is lying on the outside of any part of this paper. A lifted one is not. */
   private heldDown(flap: ReadonlySet<number>, under: boolean): boolean {
+    const { lifted } = this;
     for (const f of flap) {
       const stack = this.book.stackOf(f);
       const at = stack.indexOf(f);
-      if ((under ? stack.slice(0, at) : stack.slice(at + 1)).some((g) => !flap.has(g))) return true;
+      if ((under ? stack.slice(0, at) : stack.slice(at + 1)).some((g) => !flap.has(g) && !lifted.has(g))) return true;
     }
     return false;
   }
 
   /**
-   * The flap that pulling this face would lift, or null if none can: not when it
-   * is the whole piece, nor when another layer is lying on the outside of it, nor
-   * when any of it has already been lifted.
+   * The flat paper around a face that can be seen, stopping at whatever covers it.
+   * Empty if the face itself is covered. Real paper can always be lifted where it
+   * shows: it bends away from under the layer holding it, and from its creases.
+   */
+  private showing(face: number, under: boolean): Set<number> {
+    const { book, lifted } = this;
+    const outermost = (f: number) => {
+      const stack = book.stackOf(f);
+      const at = stack.indexOf(f);
+      return !(under ? stack.slice(0, at) : stack.slice(at + 1)).some((g) => !lifted.has(g));
+    };
+    const shown = new Set<number>();
+    if (lifted.has(face) || !outermost(face)) return shown;
+    const flat = this.flatRegion(face);
+    shown.add(face);
+    const todo = [face];
+    while (todo.length) {
+      const f = todo.pop() as number;
+      for (let k = 0; k < 3; k++) {
+        const g = book.neighbour[f * 3 + k] as number;
+        if (g < 0 || shown.has(g) || !flat.has(g) || book.edgeBlocked(f, k) || lifted.has(g) || !outermost(g)) continue;
+        shown.add(g);
+        todo.push(g);
+      }
+    }
+    return shown;
+  }
+
+  /**
+   * The paper that pulling this face would lift, or null if there is none to peel
+   * away from anything. A whole flap if one is free, and otherwise as much as shows:
+   * anything that can be seen can be taken hold of.
    */
   flapToLift(face: number, under = false): Set<number> | null {
+    const { book, lifted } = this;
+    const stacked = (paper: ReadonlySet<number>) => [...paper].some((f) => book.depth(f) > 1);
     const flap = this.flapOf(face, under);
-    if (flap.size === this.book.faces.length || this.heldDown(flap, under)) return null;
-    const { lifted } = this;
-    if ([...flap].some((f) => lifted.has(f))) return null;
-    return [...flap].some((f) => this.book.depth(f) > 1) ? flap : null;
+    if (flap.size < book.faces.length && !this.heldDown(flap, under) && ![...flap].some((f) => lifted.has(f)) && stacked(flap)) return flap;
+    const shown = this.showing(face, under);
+    return shown.size > 0 && shown.size < book.faces.length && stacked(shown) ? shown : null;
   }
 
   /** The way the paper's top faces in the world, read from the paper that is not lifted. */

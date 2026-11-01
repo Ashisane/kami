@@ -96,6 +96,8 @@ export interface LabReadout {
   floppiness: number;
   /** How far the paper rises off the ground, in metres. */
   height: number;
+  /** The lowest point of paper actually drawn, in metres. */
+  lowest: number;
   /** Faces lit up under the pointer, ready to lift. */
   hoverFaces: number;
   /** Faces lifted off their stack right now. */
@@ -229,8 +231,8 @@ export class FoldLab {
     this.raycaster.setFromCamera(this.pointer, this.camera);
   }
 
-  /** The nearest paper under the pointer. */
-  private pick(): { bench: Bench; tri: number; b0: number; b1: number; b2: number; fromAbove: boolean } | null {
+  /** The nearest paper under the pointer. Reaching under passes through flaps already lifted. */
+  private pick(reachUnder = false): { bench: Bench; tri: number; b0: number; b1: number; b2: number; fromAbove: boolean } | null {
     const { origin, direction } = this.raycaster.ray;
     const hit = new Vector3();
     const a = new Vector3(), b = new Vector3(), c = new Vector3(), e1 = new Vector3(), e2 = new Vector3(), n = new Vector3();
@@ -238,9 +240,10 @@ export class FoldLab {
     let result: ReturnType<FoldLab['pick']> = null;
     for (const bench of this.benches) {
       const { soft } = bench.piece;
-      const { tris, triCount } = soft.mesh;
+      const { tris, triCount, triFlap } = soft.mesh;
       const x = soft.x;
       for (let t = 0; t < triCount; t++) {
+        if (reachUnder && (triFlap[t] as number) >= 0) continue;
         a.fromArray(x, (tris[t * 3] as number) * 3);
         b.fromArray(x, (tris[t * 3 + 1] as number) * 3);
         c.fromArray(x, (tris[t * 3 + 2] as number) * 3);
@@ -292,7 +295,7 @@ export class FoldLab {
       this.beginPress(held, event, false);
       return;
     }
-    const hit = this.pick();
+    const hit = this.pick(event.ctrlKey);
     if (!hit) return;
     if (event.ctrlKey) hit.fromAbove = false;
     const grip = this.grab(hit, event.shiftKey);
@@ -395,7 +398,7 @@ export class FoldLab {
       return;
     }
     this.ray(event);
-    const hit = this.markerUnderPointer() ? null : this.pick();
+    const hit = this.markerUnderPointer() ? null : this.pick(event.ctrlKey);
     const fromAbove = (hit?.fromAbove ?? true) && !event.ctrlKey;
     const face = hit && !hit.bench.piece.pulling ? this.faceOn(hit.bench, hit.tri, fromAbove) : -1;
     if (!hit || face < 0) {
@@ -1119,6 +1122,7 @@ export class FoldLab {
       cellMetres: this.definition.size / this.definition.cells,
       floppiness: this.definition.floppiness,
       height: this.height(),
+      lowest: this.benches.reduce((low, b) => Math.min(low, b.view.lowest), Infinity),
       hoverFaces: this.hover?.size ?? 0,
       liftedFaces: this.benches.reduce((sum, b) => sum + b.piece.lifted.size, 0),
       fixedFlaps: this.benches.reduce((sum, b) => sum + b.piece.fixedFlaps, 0),

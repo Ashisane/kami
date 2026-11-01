@@ -64,7 +64,9 @@ export class CuttingMat {
   constructor(private readonly anisotropy: number) {
     const size = TILE_METRES * TILES;
     // Lambert: a desk with any sheen turns into a mirror under a low sun.
-    this.mesh = new Mesh(new PlaneGeometry(size, size), new MeshLambertMaterial());
+    // Pushed back in depth: real paper rests a millimetre or two up, which a far camera
+    // cannot tell from the mat, and the two would flicker through each other.
+    this.mesh = new Mesh(new PlaneGeometry(size, size), new MeshLambertMaterial({ polygonOffset: true, polygonOffsetFactor: 2, polygonOffsetUnits: 8 }));
     this.mesh.rotation.x = -Math.PI / 2;
     this.mesh.receiveShadow = true;
     this.set('mat');

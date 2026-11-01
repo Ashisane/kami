@@ -294,6 +294,32 @@ describe('folded paper in the solver', () => {
     }
   });
 
+  it('lets anything that shows be lifted, at every step of a plane', () => {
+    let piece = new SheetPiece(sheet);
+    const plane = RECIPES.find((r) => r.id === 'plane') as Recipe;
+    for (const step of plane.steps) {
+      if (step.action === 'trim') {
+        const pieces = piece.cut({ kind: step.kind, c: step.at * 2 * U }, step.from * 2 * U, step.to * 2 * U);
+        piece = pieces.reduce((a, b) => (b.book.faces.length > a.book.faces.length ? b : a));
+      }
+      if (step.action !== 'fold') continue;
+      piece.fold(foldRequest(piece.book, 10, step));
+      for (const stack of piece.book.stacks.values()) {
+        if (stack.length > 1) expect(piece.flapToLift(stack.at(-1) as number)).not.toBeNull();
+      }
+    }
+  });
+
+  it('finds what a lifted wing was covering', () => {
+    const { piece } = foldedRecipe('plane');
+    const wing = outer(piece, false);
+    const covered = piece.book.stackOf(wing).at(-2) as number;
+    expect(piece.flapToLift(covered)).toBeNull();
+    piece.peel(wing);
+    piece.fixFlaps();
+    expect(piece.flapToLift(covered)).not.toBeNull();
+  });
+
   it('refuses to peel a flap with another layer on top of it', () => {
     const piece = new SheetPiece(sheet);
     foldAll(piece, line('x', 5), 1);
