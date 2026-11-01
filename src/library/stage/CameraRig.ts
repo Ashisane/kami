@@ -38,13 +38,16 @@ export class CameraRig {
     this.view('hero', true);
   }
 
-  frame(bounds: Box3, instant = false): void {
+  /** Frames a box. Below 1 frames tighter, for flat subjects whose corners can sit off screen. */
+  frame(bounds: Box3, tightness = 1, instant = false): number {
     const size = bounds.getSize(new Vector3());
     bounds.getCenter(this.center);
     const radius = Math.max(0.35, size.length() / 2);
     const halfFov = MathUtils.degToRad(this.camera.fov / 2);
-    this.distance = (radius / Math.sin(halfFov)) * 1.15;
+    this.distance = (radius / Math.sin(halfFov)) * 1.15 * tightness;
+    this.controls.maxDistance = Math.max(24, this.distance * 2);
     this.view(this.angle, instant);
+    return this.distance;
   }
 
   /** Multiplies the framing distance. Values above 1 move closer, for inspecting grain. */

@@ -3,11 +3,13 @@ import type { InspectorTab } from '../state';
 import { flash, h, replace } from './dom';
 import { assetPanel } from './panels/AssetPanel';
 import { collidePanel } from './panels/CollidePanel';
+import { foldPanel } from './panels/FoldPanel';
 import { lightPanel } from './panels/LightPanel';
 import { motionPanel } from './panels/MotionPanel';
 import { paperPanel } from './panels/PaperPanel';
 
 const TABS: readonly { id: InspectorTab; label: string; panel: (context: LibraryContext) => HTMLElement }[] = [
+  { id: 'fold', label: 'Fold', panel: foldPanel },
   { id: 'asset', label: 'Asset', panel: assetPanel },
   { id: 'motion', label: 'Motion', panel: motionPanel },
   { id: 'collide', label: 'Collide', panel: collidePanel },

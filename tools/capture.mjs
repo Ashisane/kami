@@ -21,6 +21,12 @@ const { values: args } = parseArgs({
     suite: { type: 'string' },
     asset: { type: 'string' },
     stock: { type: 'string' },
+    sheet: { type: 'string' },
+    recipe: { type: 'string' },
+    cells: { type: 'string' },
+    settle: { type: 'string' },
+    hold: { type: 'string' },
+    rigidity: { type: 'string' },
     clip: { type: 'string' },
     time: { type: 'string' },
     camera: { type: 'string' },
@@ -47,6 +53,12 @@ const ANGLES = ['hero', 'front', 'side', 'back', 'top'];
 const request = {
   asset: args.asset,
   stock: args.stock,
+  sheet: args.sheet,
+  recipe: args.recipe,
+  cells: args.cells === undefined ? undefined : Number(args.cells),
+  settle: args.settle === undefined ? undefined : Number(args.settle),
+  hold: args.hold?.split(',').map(Number),
+  rigidity: args.rigidity === undefined ? undefined : Number(args.rigidity),
   clip: args.clip,
   time: args.time === undefined ? undefined : Number(args.time),
   camera: args.camera,
@@ -63,7 +75,12 @@ const request = {
 let shots;
 if (args.suite === 'smoke') {
   const asset = 'calibration.fold_test';
+  const sheet = 'sheet.standard';
   shots = [
+    { name: 'fold-lab', request: { sheet, tab: 'fold', settle: 20 } },
+    { name: 'sheet-held', bare: true, request: { sheet, hold: [-5, -5, 5], settle: 120 } },
+    { name: 'sheet-book', bare: true, request: { sheet, recipe: 'book', settle: 40 } },
+    { name: 'sheet-plane', bare: true, request: { sheet, recipe: 'plane', settle: 40 } },
     { name: 'library', request: { asset, clip: 'fold', time: 1.5, tab: 'asset' } },
     { name: 'motion-mid-fold', request: { asset, clip: 'fold', time: 0.62, tab: 'motion' } },
     { name: 'collide', request: { asset, clip: 'fold', time: 0.8, tab: 'collide', colliders: true, sockets: true } },
@@ -78,7 +95,7 @@ if (args.suite === 'smoke') {
     request: { ...request, asset: args.turnaround, camera },
   }));
 } else {
-  shots = [{ name: args.name ?? args.asset ?? args.stock ?? 'shot', bare: args.bare, request }];
+  shots = [{ name: args.name ?? args.recipe ?? args.asset ?? args.stock ?? 'shot', bare: args.bare, request }];
 }
 
 const server = await createServer({ server: { port: 5199, strictPort: false }, logLevel: 'error' });

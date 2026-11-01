@@ -4,6 +4,7 @@ import { Spring } from '@/core/anim/spring';
 import { instantiate } from '@/core/asset/AssetInstance';
 import type { AssetInstance } from '@/core/asset/AssetInstance';
 import { getAsset } from '@/core/asset/registry';
+import { getSheet } from '@/core/asset/sheets';
 import { ScrapBurst } from '@/core/fx/ScrapBurst';
 import { Shake } from '@/core/fx/Shake';
 import { bakePaperGrain } from '@/core/paper/grainBake';
@@ -13,6 +14,7 @@ import { createRenderer, QUALITY, RenderPipeline } from '@/core/render/RenderPip
 import type { Quality } from '@/core/render/RenderPipeline';
 import type { LightingPreset } from '@/core/render/lighting';
 import type { StockId } from '@/core/paper/stocks';
+import { FoldLab } from '../lab/FoldLab';
 import { CameraRig } from './CameraRig';
 import type { CameraAngle } from './CameraRig';
 import { ClipDeck } from './ClipDeck';
@@ -27,6 +29,7 @@ export type ViewMode = 'lit' | 'clay' | 'wire' | 'normals';
 
 const TURNTABLE_SPEED = 0.42;
 const MAX_FRAME_TIME = 1 / 20;
+const SHEET_FRAMING = 1;
 const SCRAP_STOCKS: readonly StockId[] = ['washi', 'vermilion', 'marigold', 'sakura', 'teal'];
 
 export class LibraryStage {
@@ -37,6 +40,7 @@ export class LibraryStage {
   readonly colliders: ColliderOverlay;
   readonly rig: CameraRig;
   instance: AssetInstance | null = null;
+  lab: FoldLab | null = null;
 
   /** Rolling average frame time in milliseconds, for the status bar. */
   frameMs = 16;
@@ -124,7 +128,29 @@ export class LibraryStage {
     this.setSubject(buildSpecimen(stock));
   }
 
+  /** Opens living paper in the Fold Lab. */
+  showSheet(id: string): void {
+    this.loadToken++;
+    this.clearSubject();
+    this.deck.attach(null);
+    this.colliders.attach(null);
+    this.sockets.attach(null);
+    const lab = new FoldLab(getSheet(id), this.scene, this.overlay, this.camera, this.renderer.domElement, this.scraps, this.shake, (enabled) => {
+      this.rig.controls.enabled = enabled;
+    });
+    lab.frozen = this.frozen;
+    this.lab = lab;
+    this.scaleFigure.position.set(-6.2, 0, 0);
+    const bounds = lab.bounds();
+    this.lights.fitFog(this.rig.frame(bounds, SHEET_FRAMING));
+    this.lights.focusOn(bounds.getCenter(new Vector3()), bounds.getSize(new Vector3()).length() * 0.8);
+    lab.update(0);
+  }
+
   private clearSubject(): void {
+    this.lab?.dispose();
+    this.lab = null;
+    this.scaleFigure.position.set(-1.3, 0, -0.6);
     this.instance?.dispose();
     this.instance = null;
     if (this.subject) {
@@ -144,7 +170,7 @@ export class LibraryStage {
     this.pivot.updateMatrixWorld(true);
 
     const bounds = this.subjectBounds();
-    this.rig.frame(bounds);
+    this.lights.fitFog(this.rig.frame(bounds));
     const center = bounds.getCenter(new Vector3());
     this.lights.focusOn(center, bounds.getSize(new Vector3()).length() * 0.9);
 
@@ -159,6 +185,7 @@ export class LibraryStage {
   }
 
   subjectBounds(): Box3 {
+    if (this.lab) return this.lab.bounds();
     const bounds = new Box3();
     if (this.subject) bounds.setFromObject(this.subject);
     return bounds;
@@ -210,6 +237,7 @@ export class LibraryStage {
     }
 
     if (this.turntable) this.pivot.rotation.y += TURNTABLE_SPEED * dt;
+    this.lab?.update(dt);
     this.scraps.update(dt);
     this.rig.update(dt);
   }
@@ -228,6 +256,7 @@ export class LibraryStage {
     this.frozen = true;
     this.camera.clearViewOffset();
     this.scraps.clear();
+    if (this.lab) this.lab.frozen = true;
     if (!this.landed) this.finishPop();
   }
 
@@ -270,7 +299,7 @@ export class LibraryStage {
   }
 
   frameSubject(): void {
-    this.rig.frame(this.subjectBounds());
+    this.lights.fitFog(this.rig.frame(this.subjectBounds(), this.lab ? SHEET_FRAMING : 1));
   }
 
   view(angle: CameraAngle, instant = false): void {

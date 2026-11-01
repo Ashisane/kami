@@ -5,8 +5,8 @@ import type { StockId } from '@/core/paper/stocks';
 import type { Surface } from './stage/CuttingMat';
 import type { ViewMode } from './stage/LibraryStage';
 
-export type Selection = { kind: 'asset'; id: string } | { kind: 'stock'; id: StockId };
-export type InspectorTab = 'asset' | 'motion' | 'collide' | 'paper' | 'light';
+export type Selection = { kind: 'sheet'; id: string } | { kind: 'asset'; id: string } | { kind: 'stock'; id: StockId };
+export type InspectorTab = 'fold' | 'asset' | 'motion' | 'collide' | 'paper' | 'light';
 
 export interface LibraryState {
   selection: Selection;
@@ -74,7 +74,7 @@ export class Store {
 export function defaultState(selection: Selection): LibraryState {
   return {
     selection,
-    tab: 'asset',
+    tab: selection.kind === 'sheet' ? 'fold' : 'asset',
     view: 'lit',
     colliders: false,
     sockets: false,

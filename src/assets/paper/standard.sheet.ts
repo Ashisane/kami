@@ -1,4 +1,4 @@
-import { defineSheet } from '@/core/asset/sheets';
+import { defineSheet } from '@/core/asset/sheetTypes';
 
 export default defineSheet({
   id: 'sheet.standard',

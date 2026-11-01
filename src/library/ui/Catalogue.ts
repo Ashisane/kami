@@ -1,5 +1,6 @@
 import { listAssets } from '@/core/asset/registry';
 import { ASSET_CATEGORIES } from '@/core/asset/types';
+import { listSheets } from '@/core/asset/sheets';
 import type { AssetCategory, AssetDefinition } from '@/core/asset/types';
 import { listStocks } from '@/core/paper/paperLibrary';
 import type { StockId } from '@/core/paper/stocks';
@@ -32,6 +33,21 @@ export function createCatalogue({ store }: LibraryContext, status: HTMLElement):
     const { selection } = store.state;
     replace(
       list,
+      h(
+        'section.shelf',
+        {},
+        h('h3.shelf-title', {}, h('span', {}, 'Living paper'), h('span.shelf-count', {}, listSheets().length)),
+        listSheets()
+          .filter((s) => !query || s.name.toLowerCase().includes(query))
+          .map((sheet) =>
+            h(
+              `button.asset-row${selection.kind === 'sheet' && selection.id === sheet.id ? '.on' : ''}`,
+              { type: 'button', title: sheet.description, onclick: () => store.set({ selection: { kind: 'sheet', id: sheet.id }, tab: 'fold' }) },
+              h('span.asset-name', {}, sheet.name),
+              h('span.asset-status', {}, `${sheet.size} m`),
+            ),
+          ),
+      ),
       ASSET_CATEGORIES.map((category) => {
         const assets = listAssets(category).filter(
           (a) => !query || a.name.toLowerCase().includes(query) || a.id.includes(query),
@@ -49,7 +65,7 @@ export function createCatalogue({ store }: LibraryContext, status: HTMLElement):
                 onclick: () =>
                   store.set({
                     selection: { kind: 'asset', id: asset.id },
-                    tab: store.state.tab === 'paper' ? 'asset' : store.state.tab,
+                    tab: store.state.tab === 'paper' || store.state.tab === 'fold' ? 'asset' : store.state.tab,
                   }),
               },
               h('span.asset-name', {}, asset.name),

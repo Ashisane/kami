@@ -41,6 +41,13 @@ export class LightRig {
     this.place();
   }
 
+  /** Keeps the far desk fading away without ever fogging the subject. */
+  fitFog(cameraDistance: number): void {
+    const fog = this.scene.fog as Fog;
+    fog.near = cameraDistance * 1.5;
+    fog.far = cameraDistance * 3.2;
+  }
+
   setShadowResolution(size: number): void {
     this.sun.shadow.mapSize.set(size, size);
     this.sun.shadow.map?.dispose();

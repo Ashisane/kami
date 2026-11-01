@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "capture": "node tools/capture.mjs",
+    "check:lab": "node tools/labcheck.mjs",
     "verify": "npm run typecheck && npm run test && npm run capture -- --suite smoke"
   },
   "dependencies": {

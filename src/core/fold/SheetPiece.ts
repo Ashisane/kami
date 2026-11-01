@@ -1,4 +1,4 @@
-import type { SheetDefinition } from '../asset/sheets';
+import type { SheetDefinition } from '../asset/sheetTypes';
 import { FoldBook } from './FoldBook';
 import type { FoldPlan, FoldRequest } from './FoldBook';
 import { reflectX, reflectZ, sideOf } from './lattice';
@@ -194,6 +194,11 @@ export class SheetPiece {
       }
     }
     return flap;
+  }
+
+  /** Faces currently lifted off their stack. */
+  get lifted(): ReadonlySet<number> {
+    return this.peeled;
   }
 
   /**

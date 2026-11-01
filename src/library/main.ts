@@ -6,6 +6,7 @@ import './styles/base.css';
 import './styles/controls.css';
 import './styles/layout.css';
 import { hasAsset, listAssets } from '@/core/asset/registry';
+import { hasSheet, listSheets } from '@/core/asset/sheets';
 import type { StockId } from '@/core/paper/stocks';
 import { isStockId } from '@/core/paper/stocks';
 import type { LibraryContext } from './context';
@@ -23,11 +24,14 @@ import { createToolbar } from './ui/Toolbar';
 const DEFAULT_STOCK: StockId = 'vermilion';
 
 function firstSelection(): Selection {
+  const sheet = listSheets()[0];
+  if (sheet) return { kind: 'sheet', id: sheet.id };
   const first = listAssets()[0];
   return first ? { kind: 'asset', id: first.id } : { kind: 'stock', id: DEFAULT_STOCK };
 }
 
 function isValid(selection: Selection): boolean {
+  if (selection.kind === 'sheet') return hasSheet(selection.id);
   return selection.kind === 'asset' ? hasAsset(selection.id) : isStockId(selection.id);
 }
 
@@ -60,7 +64,8 @@ async function boot(): Promise<void> {
 
   const showSelection = async () => {
     const { selection } = store.state;
-    if (selection.kind === 'stock') stage.showSpecimen(selection.id);
+    if (selection.kind === 'sheet') stage.showSheet(selection.id);
+    else if (selection.kind === 'stock') stage.showSpecimen(selection.id);
     else await stage.showAsset(selection.id, () => stage.deck.play());
     inspector.refresh();
   };
@@ -100,6 +105,10 @@ async function boot(): Promise<void> {
     else if (event.key === 'g') store.set({ grid: !state.grid });
     else if (event.key === 't') store.set({ turntable: !state.turntable });
     else if (event.key === 'f') stage.frameSubject();
+    else if (event.key === 'z') stage.lab?.stepBack();
+    else if (event.key === 'r') stage.lab?.reset();
+    else if (event.key === 'x' && stage.lab) stage.lab.tool = stage.lab.tool === 'cut' ? 'fold' : 'cut';
+    else if (event.key === 'Escape') stage.lab?.releaseAll();
   });
 
   // Status is read straight from the renderer, once a second so it stays legible.

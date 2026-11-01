@@ -1,3 +1,4 @@
+import { Vector3 } from 'three';
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 import { listAssets, getAsset } from '@/core/asset/registry';
 import { instantiate } from '@/core/asset/AssetInstance';
@@ -16,6 +17,17 @@ import type { InspectorTab } from './state';
 export interface CaptureRequest {
   asset?: string;
   stock?: StockId;
+  sheet?: string;
+  /** A fold recipe to apply to the sheet. */
+  recipe?: string;
+  /** Half-cells per side, to compare grid sizes. */
+  cells?: number;
+  /** Hold a flat spot up: x, z, height. */
+  hold?: [number, number, number];
+  /** Sets rigidity after everything else. */
+  rigidity?: number;
+  /** Simulation steps to run before the shot. */
+  settle?: number;
   clip?: string;
   /** Seconds into the clip. */
   time?: number;
@@ -62,6 +74,13 @@ export function installDebugApi({ stage, store }: LibraryContext, selectionLoade
     },
     roundTrip,
     errors: [] as string[],
+    lab: () => stage.lab?.readout() ?? null,
+    /** Where a world point appears on screen, so a test can aim the real mouse at it. */
+    screenOf(x: number, y: number, z: number): [number, number] {
+      const point = new Vector3(x, y, z).project(stage.camera);
+      const rect = stage.renderer.domElement.getBoundingClientRect();
+      return [((point.x + 1) / 2) * rect.width, ((1 - point.y) / 2) * rect.height];
+    },
 
     /** Real frame cost of each quality tier on this machine's GPU. */
     benchmark(): Record<string, string> {
@@ -79,8 +98,20 @@ export function installDebugApi({ stage, store }: LibraryContext, selectionLoade
       stage.freeze();
       if (request.asset) store.set({ selection: { kind: 'asset', id: request.asset } });
       if (request.stock) store.set({ selection: { kind: 'stock', id: request.stock } });
+      if (request.sheet) store.set({ selection: { kind: 'sheet', id: request.sheet } });
       await selectionLoaded();
       stage.deck.pause();
+      if (stage.lab) {
+        const { lab } = stage;
+        lab.frozen = true;
+        if (request.cells) lab.setCells(request.cells);
+        const failures = request.recipe ? lab.applyRecipe(request.recipe).filter(Boolean) : [];
+        if (failures.length) throw new Error(`Recipe ${request.recipe} failed: ${failures.join(', ')}`);
+        if (request.hold) lab.holdAt(...request.hold);
+        if (request.settle) lab.settle(request.settle);
+        if (request.rigidity !== undefined) lab.setRigidity(request.rigidity);
+        lab.update(0);
+      }
       if (request.tab) store.set({ tab: request.tab });
       if (request.view) store.set({ view: request.view });
       if (request.colliders !== undefined) store.set({ colliders: request.colliders });

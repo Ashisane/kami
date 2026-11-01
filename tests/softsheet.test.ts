@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { SheetDefinition } from '@/core/asset/sheets';
+import type { SheetDefinition } from '@/core/asset/sheetTypes';
 import { UNITS_PER_CELL as U } from '@/core/fold/lattice';
 import type { LineKind, MirrorLine } from '@/core/fold/lattice';
 import { SheetPiece } from '@/core/fold/SheetPiece';
