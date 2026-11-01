@@ -1,0 +1,574 @@
+import { extractRotation, rotateInto } from './rotation';
+import type { Quat } from './rotation';
+import type { SoftMesh } from './softMesh';
+
+/**
+ * Floppy paper. An XPBD particle solver in typed arrays with no three.js, so it
+ * can run headless in tests, move to a worker, or run on a server.
+ */
+export interface SoftSettings {
+  substeps: number;
+  gravity: number;
+  /** One layer's thickness in metres. */
+  thickness: number;
+  /** How easily one layer bends. Larger is floppier. */
+  floppiness: number;
+  /** Air resistance on the face of the sheet. */
+  airDrag: number;
+  /** Fraction of ground sliding removed each substep. */
+  friction: number;
+}
+
+export const DEFAULT_SOFT: SoftSettings = {
+  substeps: 12,
+  gravity: 9.8,
+  thickness: 0.03,
+  floppiness: 1,
+  airDrag: 1.4,
+  friction: 0.8,
+};
+
+/** A point on the paper held in place: by a player, or by a test pin. */
+export interface Pin {
+  tri: number;
+  /** Barycentric weights across the triangle's corners. */
+  b0: number;
+  b1: number;
+  b2: number;
+  x: number;
+  y: number;
+  z: number;
+}
+
+const BEND_COMPLIANCE = 0.02;
+/** Bending stiffness of a stack grows with the cube of its thickness, as a real beam's does. */
+const STACK_STIFFENING = 3;
+const PIN_STRENGTH = 0.7;
+const DAMPING = 0.998;
+/** Fastest a point may move per substep, in sheet thicknesses, so layers cannot pass through. */
+const MAX_TRAVEL = 0.45;
+
+const CONTACT_SAMPLES = [1 / 3, 1 / 3, 1 / 3, 0.5, 0.5, 0, 0, 0.5, 0.5, 0.5, 0, 0.5];
+const SAMPLE_COUNT = CONTACT_SAMPLES.length / 3;
+const CONTACT_REACH = 0.2;
+const INSIDE_MARGIN = 0.03;
+
+export class SoftSheet {
+  readonly x: Float64Array;
+  readonly v: Float64Array;
+  readonly w: Float64Array;
+  readonly pins: Pin[] = [];
+  readonly settings: SoftSettings;
+
+  /** 0 is cloth, up to 1 which is one solid body. See `harden`. */
+  rigidity = 0;
+
+  private readonly p: Float64Array;
+  private readonly hingeRest: Float64Array;
+  private readonly hingeCompliance: Float64Array;
+  private readonly hingePrevious: Float64Array;
+  private readonly groundHeight: Float64Array;
+
+  // Sides remembered per contact, so a layer that goes too far is pushed back the right way.
+  private readonly sides = new Map<number, number>();
+  private contactTri = new Int32Array(1 << 12);
+  private contactSample = new Int32Array(1 << 12);
+  private contactOther = new Int32Array(1 << 12);
+  private contactSide = new Int8Array(1 << 12);
+  private contactCount = 0;
+  private readonly grid = new Map<number, number[]>();
+  private readonly centre: Float64Array;
+
+  private solid: Float64Array | null = null;
+  private readonly orientation: Quat = [0, 0, 0, 1];
+  private readonly covariance = new Float64Array(9);
+
+  constructor(
+    readonly mesh: SoftMesh,
+    settings: Partial<SoftSettings> = {},
+    initial?: Float64Array,
+  ) {
+    this.settings = { ...DEFAULT_SOFT, ...settings };
+    const n = mesh.vertexCount;
+    this.x = new Float64Array(n * 3);
+    this.p = new Float64Array(n * 3);
+    this.v = new Float64Array(n * 3);
+    this.w = mesh.inverseMass.slice();
+    this.groundHeight = new Float64Array(n);
+    this.centre = new Float64Array(mesh.triCount * 3);
+
+    const { thickness } = this.settings;
+    for (let i = 0; i < n; i++) {
+      this.groundHeight[i] = ((mesh.vertexLayers[i] as number) * thickness) / 2;
+      if (!initial) {
+        this.x[i * 3] = mesh.flat[i * 2] as number;
+        this.x[i * 3 + 1] = this.groundHeight[i] as number;
+        this.x[i * 3 + 2] = mesh.flat[i * 2 + 1] as number;
+      }
+    }
+    if (initial) this.x.set(initial);
+
+    const hinges = mesh.hinges.length / 4;
+    this.hingeRest = new Float64Array(hinges);
+    this.hingeCompliance = new Float64Array(hinges);
+    this.hingePrevious = new Float64Array(hinges);
+    this.applyStiffness();
+    for (let h = 0; h < hinges; h++) this.hingePrevious[h] = this.hingeAngle(h);
+  }
+
+  private applyStiffness(): void {
+    const { floppiness } = this.settings;
+    for (let h = 0; h < this.hingeCompliance.length; h++) {
+      this.hingeCompliance[h] = (BEND_COMPLIANCE * floppiness) / (this.mesh.hingeLayers[h] as number) ** STACK_STIFFENING;
+    }
+  }
+
+  private hingeAngle(h: number): number {
+    const { hinges } = this.mesh;
+    const x = this.x;
+    const a = (hinges[h * 4] as number) * 3, b = (hinges[h * 4 + 1] as number) * 3;
+    const c = (hinges[h * 4 + 2] as number) * 3, d = (hinges[h * 4 + 3] as number) * 3;
+    const ex = (x[b] as number) - (x[a] as number), ey = (x[b + 1] as number) - (x[a + 1] as number), ez = (x[b + 2] as number) - (x[a + 2] as number);
+    const cx = (x[c] as number) - (x[a] as number), cy = (x[c + 1] as number) - (x[a + 1] as number), cz = (x[c + 2] as number) - (x[a + 2] as number);
+    const dx = (x[d] as number) - (x[a] as number), dy = (x[d + 1] as number) - (x[a + 1] as number), dz = (x[d + 2] as number) - (x[a + 2] as number);
+    const n1x = ey * cz - ez * cy, n1y = ez * cx - ex * cz, n1z = ex * cy - ey * cx;
+    const n2x = dy * ez - dz * ey, n2y = dz * ex - dx * ez, n2z = dx * ey - dy * ex;
+    const length = Math.sqrt(ex * ex + ey * ey + ez * ez) || 1;
+    const sx = n1y * n2z - n1z * n2y, sy = n1z * n2x - n1x * n2z, sz = n1x * n2y - n1y * n2x;
+    return Math.atan2((sx * ex + sy * ey + sz * ez) / length, n1x * n2x + n1y * n2y + n1z * n2z);
+  }
+
+  /** Current fold angle across a hinge, in radians. */
+  angleAt(h: number): number {
+    return this.hingePrevious[h] as number;
+  }
+
+  addPin(tri: number, b0: number, b1: number, b2: number): Pin {
+    const pin: Pin = { tri, b0, b1, b2, x: 0, y: 0, z: 0 };
+    this.pinPoint(pin, pin);
+    this.pins.push(pin);
+    return pin;
+  }
+
+  removePin(pin: Pin): void {
+    const i = this.pins.indexOf(pin);
+    if (i >= 0) this.pins.splice(i, 1);
+  }
+
+  /** Where a pinned point of the paper actually is right now. */
+  pinPoint(pin: Pin, out: { x: number; y: number; z: number }): void {
+    const { tris } = this.mesh;
+    const a = (tris[pin.tri * 3] as number) * 3, b = (tris[pin.tri * 3 + 1] as number) * 3, c = (tris[pin.tri * 3 + 2] as number) * 3;
+    const x = this.x;
+    out.x = pin.b0 * (x[a] as number) + pin.b1 * (x[b] as number) + pin.b2 * (x[c] as number);
+    out.y = pin.b0 * (x[a + 1] as number) + pin.b1 * (x[b + 1] as number) + pin.b2 * (x[c + 1] as number);
+    out.z = pin.b0 * (x[a + 2] as number) + pin.b1 * (x[b + 2] as number) + pin.b2 * (x[c + 2] as number);
+  }
+
+  step(dt: number): void {
+    const { substeps } = this.settings;
+    const h = dt / substeps;
+    this.applyAir(dt);
+    const rigid = this.solid !== null;
+    if (!rigid) this.findContacts();
+    for (let s = 0; s < substeps; s++) {
+      this.integrate(h);
+      this.solvePins();
+      if (rigid) {
+        this.solveGround();
+        this.solveSolid();
+      } else {
+        this.solveHinges(h);
+        this.solveContacts();
+        // Twice, because a hanging sheet puts all its weight through a few edges.
+        this.solveDistances();
+        this.solveDistances();
+        this.solveGround();
+      }
+      this.updateVelocity(h);
+    }
+  }
+
+  /** The sheet's face catches the air, so it falls slowly and billows. */
+  private applyAir(dt: number): void {
+    const { tris, triCount } = this.mesh;
+    const { airDrag } = this.settings;
+    const x = this.x, v = this.v, w = this.w;
+    for (let t = 0; t < triCount; t++) {
+      const ia = tris[t * 3] as number, ib = tris[t * 3 + 1] as number, ic = tris[t * 3 + 2] as number;
+      const a = ia * 3, b = ib * 3, c = ic * 3;
+      const ux = (x[b] as number) - (x[a] as number), uy = (x[b + 1] as number) - (x[a + 1] as number), uz = (x[b + 2] as number) - (x[a + 2] as number);
+      const px = (x[c] as number) - (x[a] as number), py = (x[c + 1] as number) - (x[a + 1] as number), pz = (x[c + 2] as number) - (x[a + 2] as number);
+      const nx = uy * pz - uz * py, ny = uz * px - ux * pz, nz = ux * py - uy * px;
+      const area = Math.sqrt(nx * nx + ny * ny + nz * nz);
+      if (area < 1e-9) continue;
+      const vx = ((v[a] as number) + (v[b] as number) + (v[c] as number)) / 3;
+      const vy = ((v[a + 1] as number) + (v[b + 1] as number) + (v[c + 1] as number)) / 3;
+      const vz = ((v[a + 2] as number) + (v[b + 2] as number) + (v[c + 2] as number)) / 3;
+      const push = -airDrag * dt * ((vx * nx + vy * ny + vz * nz) / area);
+      const fx = nx * push, fy = ny * push, fz = nz * push;
+      for (const [i, j] of [[ia, a], [ib, b], [ic, c]] as const) {
+        const m = w[i] as number;
+        v[j] = (v[j] as number) + fx * m;
+        v[j + 1] = (v[j + 1] as number) + fy * m;
+        v[j + 2] = (v[j + 2] as number) + fz * m;
+      }
+    }
+  }
+
+  private integrate(h: number): void {
+    const { x, v, p, w } = this;
+    const limit = (MAX_TRAVEL * this.settings.thickness) / h;
+    const fall = this.settings.gravity * h;
+    for (let i = 0; i < w.length; i++) {
+      const j = i * 3;
+      p[j] = x[j] as number;
+      p[j + 1] = x[j + 1] as number;
+      p[j + 2] = x[j + 2] as number;
+      if (w[i] === 0) continue;
+      v[j + 1] = (v[j + 1] as number) - fall;
+      const vx = v[j] as number, vy = v[j + 1] as number, vz = v[j + 2] as number;
+      const speed = Math.sqrt(vx * vx + vy * vy + vz * vz);
+      const scale = speed > limit ? limit / speed : 1;
+      v[j] = vx * scale;
+      v[j + 1] = vy * scale;
+      v[j + 2] = vz * scale;
+      x[j] = (x[j] as number) + vx * scale * h;
+      x[j + 1] = (x[j + 1] as number) + vy * scale * h;
+      x[j + 2] = (x[j + 2] as number) + vz * scale * h;
+    }
+  }
+
+  private solvePins(): void {
+    const { tris } = this.mesh;
+    const { x, w } = this;
+    for (const pin of this.pins) {
+      const ia = tris[pin.tri * 3] as number, ib = tris[pin.tri * 3 + 1] as number, ic = tris[pin.tri * 3 + 2] as number;
+      const a = ia * 3, b = ib * 3, c = ic * 3;
+      const px = pin.b0 * (x[a] as number) + pin.b1 * (x[b] as number) + pin.b2 * (x[c] as number);
+      const py = pin.b0 * (x[a + 1] as number) + pin.b1 * (x[b + 1] as number) + pin.b2 * (x[c + 1] as number);
+      const pz = pin.b0 * (x[a + 2] as number) + pin.b1 * (x[b + 2] as number) + pin.b2 * (x[c + 2] as number);
+      const wa = (w[ia] as number) * pin.b0, wb = (w[ib] as number) * pin.b1, wc = (w[ic] as number) * pin.b2;
+      const total = wa * pin.b0 + wb * pin.b1 + wc * pin.b2;
+      if (total === 0) continue;
+      const s = PIN_STRENGTH / total;
+      const dx = (pin.x - px) * s, dy = (pin.y - py) * s, dz = (pin.z - pz) * s;
+      x[a] = (x[a] as number) + dx * wa; x[a + 1] = (x[a + 1] as number) + dy * wa; x[a + 2] = (x[a + 2] as number) + dz * wa;
+      x[b] = (x[b] as number) + dx * wb; x[b + 1] = (x[b + 1] as number) + dy * wb; x[b + 2] = (x[b + 2] as number) + dz * wb;
+      x[c] = (x[c] as number) + dx * wc; x[c + 1] = (x[c + 1] as number) + dy * wc; x[c + 2] = (x[c + 2] as number) + dz * wc;
+    }
+  }
+
+  private solveDistances(): void {
+    const { edges, edgeLength } = this.mesh;
+    const { x, w } = this;
+    for (let e = 0; e < edgeLength.length; e++) {
+      const ia = edges[e * 2] as number, ib = edges[e * 2 + 1] as number;
+      const wa = w[ia] as number, wb = w[ib] as number, total = wa + wb;
+      if (total === 0) continue;
+      const a = ia * 3, b = ib * 3;
+      const dx = (x[a] as number) - (x[b] as number), dy = (x[a + 1] as number) - (x[b + 1] as number), dz = (x[a + 2] as number) - (x[b + 2] as number);
+      const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (d === 0) continue;
+      const s = (d - (edgeLength[e] as number)) / d / total;
+      const sa = s * wa, sb = s * wb;
+      x[a] = (x[a] as number) - dx * sa; x[a + 1] = (x[a + 1] as number) - dy * sa; x[a + 2] = (x[a + 2] as number) - dz * sa;
+      x[b] = (x[b] as number) + dx * sb; x[b + 1] = (x[b + 1] as number) + dy * sb; x[b + 2] = (x[b + 2] as number) + dz * sb;
+    }
+  }
+
+  private solveHinges(h: number): void {
+    const { hinges } = this.mesh;
+    const { x, w } = this;
+    const count = hinges.length / 4;
+    const inverseStep = 1 / (h * h);
+    for (let n = 0; n < count; n++) {
+      const ia = hinges[n * 4] as number, ib = hinges[n * 4 + 1] as number, ic = hinges[n * 4 + 2] as number, id = hinges[n * 4 + 3] as number;
+      const a = ia * 3, b = ib * 3, c = ic * 3, d = id * 3;
+      const ex = (x[b] as number) - (x[a] as number), ey = (x[b + 1] as number) - (x[a + 1] as number), ez = (x[b + 2] as number) - (x[a + 2] as number);
+      const cx = (x[c] as number) - (x[a] as number), cy = (x[c + 1] as number) - (x[a + 1] as number), cz = (x[c + 2] as number) - (x[a + 2] as number);
+      const dx = (x[d] as number) - (x[a] as number), dy = (x[d + 1] as number) - (x[a + 1] as number), dz = (x[d + 2] as number) - (x[a + 2] as number);
+      const n1x = ey * cz - ez * cy, n1y = ez * cx - ex * cz, n1z = ex * cy - ey * cx;
+      const n2x = dy * ez - dz * ey, n2y = dz * ex - dx * ez, n2z = dx * ey - dy * ex;
+      const n1s = n1x * n1x + n1y * n1y + n1z * n1z, n2s = n2x * n2x + n2y * n2y + n2z * n2z;
+      if (n1s < 1e-12 || n2s < 1e-12) continue;
+      const lengthSquared = ex * ex + ey * ey + ez * ez, length = Math.sqrt(lengthSquared);
+      const sx = n1y * n2z - n1z * n2y, sy = n1z * n2x - n1x * n2z, sz = n1x * n2y - n1y * n2x;
+      let angle = Math.atan2((sx * ex + sy * ey + sz * ez) / length, n1x * n2x + n1y * n2y + n1z * n2z);
+      const previous = this.hingePrevious[n] as number;
+      while (angle - previous > Math.PI) angle -= Math.PI * 2;
+      while (angle - previous < -Math.PI) angle += Math.PI * 2;
+      this.hingePrevious[n] = angle;
+
+      const k1 = -length / n1s, k2 = -length / n2s;
+      const gcx = n1x * k1, gcy = n1y * k1, gcz = n1z * k1;
+      const gdx = n2x * k2, gdy = n2y * k2, gdz = n2z * k2;
+      const s1 = (cx * ex + cy * ey + cz * ez) / lengthSquared, s2 = (dx * ex + dy * ey + dz * ez) / lengthSquared;
+      const gax = -(1 - s1) * gcx - (1 - s2) * gdx, gay = -(1 - s1) * gcy - (1 - s2) * gdy, gaz = -(1 - s1) * gcz - (1 - s2) * gdz;
+      const gbx = -s1 * gcx - s2 * gdx, gby = -s1 * gcy - s2 * gdy, gbz = -s1 * gcz - s2 * gdz;
+      const wa = w[ia] as number, wb = w[ib] as number, wc = w[ic] as number, wd = w[id] as number;
+      const weight = wa * (gax * gax + gay * gay + gaz * gaz) + wb * (gbx * gbx + gby * gby + gbz * gbz)
+        + wc * (gcx * gcx + gcy * gcy + gcz * gcz) + wd * (gdx * gdx + gdy * gdy + gdz * gdz);
+      const lambda = -(angle - (this.hingeRest[n] as number)) / (weight + (this.hingeCompliance[n] as number) * inverseStep);
+      x[a] = (x[a] as number) + wa * gax * lambda; x[a + 1] = (x[a + 1] as number) + wa * gay * lambda; x[a + 2] = (x[a + 2] as number) + wa * gaz * lambda;
+      x[b] = (x[b] as number) + wb * gbx * lambda; x[b + 1] = (x[b + 1] as number) + wb * gby * lambda; x[b + 2] = (x[b + 2] as number) + wb * gbz * lambda;
+      x[c] = (x[c] as number) + wc * gcx * lambda; x[c + 1] = (x[c + 1] as number) + wc * gcy * lambda; x[c + 2] = (x[c + 2] as number) + wc * gcz * lambda;
+      x[d] = (x[d] as number) + wd * gdx * lambda; x[d + 1] = (x[d + 1] as number) + wd * gdy * lambda; x[d + 2] = (x[d + 2] as number) + wd * gdz * lambda;
+    }
+  }
+
+  private findContacts(): void {
+    const { tris, triCount } = this.mesh;
+    const { x, centre, grid } = this;
+    const cell = 0.75;
+    const key = (i: number, j: number, k: number) => (i + 512) * 1048576 + (j + 512) * 1024 + (k + 512);
+    grid.clear();
+    this.contactCount = 0;
+    for (let t = 0; t < triCount; t++) {
+      const a = (tris[t * 3] as number) * 3, b = (tris[t * 3 + 1] as number) * 3, c = (tris[t * 3 + 2] as number) * 3;
+      const cx = ((x[a] as number) + (x[b] as number) + (x[c] as number)) / 3;
+      const cy = ((x[a + 1] as number) + (x[b + 1] as number) + (x[c + 1] as number)) / 3;
+      const cz = ((x[a + 2] as number) + (x[b + 2] as number) + (x[c + 2] as number)) / 3;
+      centre[t * 3] = cx;
+      centre[t * 3 + 1] = cy;
+      centre[t * 3 + 2] = cz;
+      const k = key(Math.floor(cx / cell), Math.floor(cy / cell), Math.floor(cz / cell));
+      const list = grid.get(k);
+      if (list) list.push(t);
+      else grid.set(k, [t]);
+    }
+    const reach = (cell * cell) / 0.9;
+    for (let t = 0; t < triCount; t++) {
+      const cx = centre[t * 3] as number, cy = centre[t * 3 + 1] as number, cz = centre[t * 3 + 2] as number;
+      const ix = Math.floor(cx / cell), iy = Math.floor(cy / cell), iz = Math.floor(cz / cell);
+      const t0 = tris[t * 3] as number, t1 = tris[t * 3 + 1] as number, t2 = tris[t * 3 + 2] as number;
+      for (let dx = -1; dx <= 1; dx++) {
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dz = -1; dz <= 1; dz++) {
+            const list = grid.get(key(ix + dx, iy + dy, iz + dz));
+            if (!list) continue;
+            for (let n = 0; n < list.length; n++) {
+              const o = list[n] as number;
+              if (o === t) continue;
+              const qx = cx - (centre[o * 3] as number), qy = cy - (centre[o * 3 + 1] as number), qz = cz - (centre[o * 3 + 2] as number);
+              if (qx * qx + qy * qy + qz * qz > reach) continue;
+              const o0 = tris[o * 3] as number, o1 = tris[o * 3 + 1] as number, o2 = tris[o * 3 + 2] as number;
+              if (t0 === o0 || t0 === o1 || t0 === o2 || t1 === o0 || t1 === o1 || t1 === o2 || t2 === o0 || t2 === o1 || t2 === o2) continue;
+              this.narrowPhase(t, o);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  private narrowPhase(t: number, o: number): void {
+    const { tris, triCount } = this.mesh;
+    const { x } = this;
+    const a = (tris[o * 3] as number) * 3, b = (tris[o * 3 + 1] as number) * 3, c = (tris[o * 3 + 2] as number) * 3;
+    const abx = (x[b] as number) - (x[a] as number), aby = (x[b + 1] as number) - (x[a + 1] as number), abz = (x[b + 2] as number) - (x[a + 2] as number);
+    const acx = (x[c] as number) - (x[a] as number), acy = (x[c + 1] as number) - (x[a + 1] as number), acz = (x[c + 2] as number) - (x[a + 2] as number);
+    let nx = aby * acz - abz * acy, ny = abz * acx - abx * acz, nz = abx * acy - aby * acx;
+    const length = Math.sqrt(nx * nx + ny * ny + nz * nz);
+    if (length < 1e-9) return;
+    nx /= length; ny /= length; nz /= length;
+    const d00 = abx * abx + aby * aby + abz * abz, d01 = abx * acx + aby * acy + abz * acz, d11 = acx * acx + acy * acy + acz * acz;
+    const det = d00 * d11 - d01 * d01;
+    const p0 = (tris[t * 3] as number) * 3, p1 = (tris[t * 3 + 1] as number) * 3, p2 = (tris[t * 3 + 2] as number) * 3;
+
+    for (let s = 0; s < SAMPLE_COUNT; s++) {
+      const b0 = CONTACT_SAMPLES[s * 3] as number, b1 = CONTACT_SAMPLES[s * 3 + 1] as number, b2 = CONTACT_SAMPLES[s * 3 + 2] as number;
+      const px = b0 * (x[p0] as number) + b1 * (x[p1] as number) + b2 * (x[p2] as number) - (x[a] as number);
+      const py = b0 * (x[p0 + 1] as number) + b1 * (x[p1 + 1] as number) + b2 * (x[p2 + 1] as number) - (x[a + 1] as number);
+      const pz = b0 * (x[p0 + 2] as number) + b1 * (x[p1 + 2] as number) + b2 * (x[p2 + 2] as number) - (x[a + 2] as number);
+      const d20 = px * abx + py * aby + pz * abz, d21 = px * acx + py * acy + pz * acz;
+      const u = (d11 * d20 - d01 * d21) / det, v = (d00 * d21 - d01 * d20) / det;
+      const memory = (t * SAMPLE_COUNT + s) * triCount + o;
+      if (u < -INSIDE_MARGIN || v < -INSIDE_MARGIN || u + v > 1 + INSIDE_MARGIN) {
+        this.sides.delete(memory);
+        continue;
+      }
+      const distance = px * nx + py * ny + pz * nz;
+      let side = this.sides.get(memory);
+      if (side === undefined) {
+        if (Math.abs(distance) > CONTACT_REACH) continue;
+        side = distance >= 0 ? 1 : -1;
+        this.sides.set(memory, side);
+      } else if (Math.abs(distance) > CONTACT_REACH * 3) {
+        this.sides.delete(memory);
+        continue;
+      }
+      this.pushContact(t, s, o, side);
+    }
+  }
+
+  private pushContact(t: number, s: number, o: number, side: number): void {
+    if (this.contactCount === this.contactTri.length) {
+      const size = this.contactCount * 2;
+      const grow = <T extends Int32Array | Int8Array>(old: T, next: T): T => {
+        next.set(old);
+        return next;
+      };
+      this.contactTri = grow(this.contactTri, new Int32Array(size));
+      this.contactSample = grow(this.contactSample, new Int32Array(size));
+      this.contactOther = grow(this.contactOther, new Int32Array(size));
+      this.contactSide = grow(this.contactSide, new Int8Array(size));
+    }
+    const n = this.contactCount++;
+    this.contactTri[n] = t;
+    this.contactSample[n] = s;
+    this.contactOther[n] = o;
+    this.contactSide[n] = side;
+  }
+
+  private solveContacts(): void {
+    const { tris, triLayers } = this.mesh;
+    const { x, w } = this;
+    const { thickness } = this.settings;
+    for (let n = 0; n < this.contactCount; n++) {
+      const t = this.contactTri[n] as number, o = this.contactOther[n] as number, s = this.contactSample[n] as number, side = this.contactSide[n] as number;
+      const ia = tris[o * 3] as number, ib = tris[o * 3 + 1] as number, ic = tris[o * 3 + 2] as number;
+      const a = ia * 3, b = ib * 3, c = ic * 3;
+      const abx = (x[b] as number) - (x[a] as number), aby = (x[b + 1] as number) - (x[a + 1] as number), abz = (x[b + 2] as number) - (x[a + 2] as number);
+      const acx = (x[c] as number) - (x[a] as number), acy = (x[c + 1] as number) - (x[a + 1] as number), acz = (x[c + 2] as number) - (x[a + 2] as number);
+      let nx = aby * acz - abz * acy, ny = abz * acx - abx * acz, nz = abx * acy - aby * acx;
+      const length = Math.sqrt(nx * nx + ny * ny + nz * nz);
+      if (length < 1e-9) continue;
+      nx /= length; ny /= length; nz /= length;
+      const i0 = tris[t * 3] as number, i1 = tris[t * 3 + 1] as number, i2 = tris[t * 3 + 2] as number;
+      const p0 = i0 * 3, p1 = i1 * 3, p2 = i2 * 3;
+      const b0 = CONTACT_SAMPLES[s * 3] as number, b1 = CONTACT_SAMPLES[s * 3 + 1] as number, b2 = CONTACT_SAMPLES[s * 3 + 2] as number;
+      const px = b0 * (x[p0] as number) + b1 * (x[p1] as number) + b2 * (x[p2] as number) - (x[a] as number);
+      const py = b0 * (x[p0 + 1] as number) + b1 * (x[p1 + 1] as number) + b2 * (x[p2 + 1] as number) - (x[a + 1] as number);
+      const pz = b0 * (x[p0 + 2] as number) + b1 * (x[p1 + 2] as number) + b2 * (x[p2 + 2] as number) - (x[a + 2] as number);
+      const gap = (thickness * ((triLayers[t] as number) + (triLayers[o] as number))) / 2;
+      const violation = side * (px * nx + py * ny + pz * nz) - gap;
+      if (violation >= 0) continue;
+      const d00 = abx * abx + aby * aby + abz * abz, d01 = abx * acx + aby * acy + abz * acz, d11 = acx * acx + acy * acy + acz * acz;
+      const det = d00 * d11 - d01 * d01;
+      const d20 = px * abx + py * aby + pz * abz, d21 = px * acx + py * acy + pz * acz;
+      const u = (d11 * d20 - d01 * d21) / det, v = (d00 * d21 - d01 * d20) / det, l = 1 - u - v;
+      const w0 = b0 * (w[i0] as number), w1 = b1 * (w[i1] as number), w2 = b2 * (w[i2] as number);
+      const wa = l * (w[ia] as number), wb = u * (w[ib] as number), wc = v * (w[ic] as number);
+      const total = b0 * w0 + b1 * w1 + b2 * w2 + l * wa + u * wb + v * wc;
+      if (total === 0) continue;
+      const push = (-violation / total) * side;
+      const fx = nx * push, fy = ny * push, fz = nz * push;
+      x[p0] = (x[p0] as number) + fx * w0; x[p0 + 1] = (x[p0 + 1] as number) + fy * w0; x[p0 + 2] = (x[p0 + 2] as number) + fz * w0;
+      x[p1] = (x[p1] as number) + fx * w1; x[p1 + 1] = (x[p1 + 1] as number) + fy * w1; x[p1 + 2] = (x[p1 + 2] as number) + fz * w1;
+      x[p2] = (x[p2] as number) + fx * w2; x[p2 + 1] = (x[p2 + 1] as number) + fy * w2; x[p2 + 2] = (x[p2 + 2] as number) + fz * w2;
+      x[a] = (x[a] as number) - fx * wa; x[a + 1] = (x[a + 1] as number) - fy * wa; x[a + 2] = (x[a + 2] as number) - fz * wa;
+      x[b] = (x[b] as number) - fx * wb; x[b + 1] = (x[b + 1] as number) - fy * wb; x[b + 2] = (x[b + 2] as number) - fz * wb;
+      x[c] = (x[c] as number) - fx * wc; x[c + 1] = (x[c + 1] as number) - fy * wc; x[c + 2] = (x[c + 2] as number) - fz * wc;
+    }
+  }
+
+  private solveGround(): void {
+    const { x, p, groundHeight } = this;
+    const { friction } = this.settings;
+    for (let i = 0; i < groundHeight.length; i++) {
+      const j = i * 3;
+      const ground = groundHeight[i] as number;
+      if ((x[j + 1] as number) >= ground) continue;
+      x[j + 1] = ground;
+      // Starting below the ground must not read as a launch: a fold thickens the
+      // paper, and pushing it out of the floor would otherwise fire it upward.
+      if ((p[j + 1] as number) < ground) p[j + 1] = ground;
+      x[j] = (x[j] as number) - ((x[j] as number) - (p[j] as number)) * friction;
+      x[j + 2] = (x[j + 2] as number) - ((x[j + 2] as number) - (p[j + 2] as number)) * friction;
+    }
+  }
+
+  private updateVelocity(h: number): void {
+    const { x, p, v } = this;
+    const scale = DAMPING / h;
+    for (let i = 0; i < x.length; i++) v[i] = ((x[i] as number) - (p[i] as number)) * scale;
+  }
+
+  /**
+   * Sets how much the sheet holds its current shape. Anything above 0 remembers
+   * this pose as its rest shape, and 1 makes it one solid body. Build the shape
+   * by holding the paper, then harden it where it stands.
+   */
+  harden(rigidity: number): void {
+    this.rigidity = rigidity;
+    this.solid = null;
+    if (rigidity >= 1) {
+      this.captureSolid();
+      return;
+    }
+    for (let h = 0; h < this.hingeRest.length; h++) this.hingeRest[h] = rigidity > 0 ? this.hingeAngle(h) : 0;
+    this.applyStiffness();
+    if (rigidity > 0) {
+      const memory = (1 - rigidity) ** 4;
+      for (let h = 0; h < this.hingeCompliance.length; h++) this.hingeCompliance[h] = (this.hingeCompliance[h] as number) * memory;
+      for (let h = 0; h < this.hingePrevious.length; h++) this.hingePrevious[h] = this.hingeRest[h] as number;
+    }
+  }
+
+  private centreOfMass(): [number, number, number] {
+    const { x, w } = this;
+    let cx = 0, cy = 0, cz = 0, total = 0;
+    for (let i = 0; i < w.length; i++) {
+      const m = 1 / ((w[i] as number) || 1e-6);
+      cx += (x[i * 3] as number) * m;
+      cy += (x[i * 3 + 1] as number) * m;
+      cz += (x[i * 3 + 2] as number) * m;
+      total += m;
+    }
+    return [cx / total, cy / total, cz / total];
+  }
+
+  private captureSolid(): void {
+    const [cx, cy, cz] = this.centreOfMass();
+    const shape = this.x.slice();
+    for (let i = 0; i < shape.length; i += 3) {
+      shape[i] = (shape[i] as number) - cx;
+      shape[i + 1] = (shape[i + 1] as number) - cy;
+      shape[i + 2] = (shape[i + 2] as number) - cz;
+    }
+    this.solid = shape;
+    this.orientation[0] = this.orientation[1] = this.orientation[2] = 0;
+    this.orientation[3] = 1;
+  }
+
+  /** Snaps every point back to the frozen shape, in the best-fitting position. */
+  private solveSolid(): void {
+    const shape = this.solid;
+    if (!shape) return;
+    const { x, w, covariance: m } = this;
+    const [cx, cy, cz] = this.centreOfMass();
+    m.fill(0);
+    for (let i = 0; i < w.length; i++) {
+      const j = i * 3;
+      const weight = 1 / ((w[i] as number) || 1e-6);
+      const px = ((x[j] as number) - cx) * weight, py = ((x[j + 1] as number) - cy) * weight, pz = ((x[j + 2] as number) - cz) * weight;
+      const qx = shape[j] as number, qy = shape[j + 1] as number, qz = shape[j + 2] as number;
+      m[0] = (m[0] as number) + px * qx; m[1] = (m[1] as number) + py * qx; m[2] = (m[2] as number) + pz * qx;
+      m[3] = (m[3] as number) + px * qy; m[4] = (m[4] as number) + py * qy; m[5] = (m[5] as number) + pz * qy;
+      m[6] = (m[6] as number) + px * qz; m[7] = (m[7] as number) + py * qz; m[8] = (m[8] as number) + pz * qz;
+    }
+    extractRotation(m, this.orientation);
+    for (let i = 0; i < w.length; i++) {
+      const j = i * 3;
+      rotateInto(this.orientation, shape[j] as number, shape[j + 1] as number, shape[j + 2] as number, x, j, cx, cy, cz);
+    }
+  }
+
+  get contacts(): number {
+    return this.contactCount;
+  }
+
+  /** The worst edge stretch right now, as a fraction. */
+  stretch(): number {
+    const { edges, edgeLength } = this.mesh;
+    const x = this.x;
+    let worst = 0;
+    for (let e = 0; e < edgeLength.length; e++) {
+      const a = (edges[e * 2] as number) * 3, b = (edges[e * 2 + 1] as number) * 3;
+      const d = Math.hypot((x[a] as number) - (x[b] as number), (x[a + 1] as number) - (x[b + 1] as number), (x[a + 2] as number) - (x[b + 2] as number));
+      worst = Math.max(worst, Math.abs(d - (edgeLength[e] as number)) / (edgeLength[e] as number));
+    }
+    return worst;
+  }
+}
