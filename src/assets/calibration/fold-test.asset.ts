@@ -11,6 +11,8 @@ import { rect, sheet } from '@/core/paper/sheet';
  */
 const SIZE = 0.6;
 const LIFT = 0.012;
+// Washi inside, colour outside, so the colour wins once the sheet is folded.
+const PAPER = { top: 'washi', bottom: 'vermilion' } as const;
 
 function hingeAt(name: string, x: number, y = 0): Group {
   const group = new Group();
@@ -35,19 +37,19 @@ function build() {
   body.position.y = LIFT;
   root.add(body);
 
-  body.add(sheet('base', rect(-SIZE / 2, -SIZE, SIZE / 2, SIZE), { top: 'vermilion' }));
+  body.add(sheet('base', rect(-SIZE / 2, -SIZE, SIZE / 2, SIZE), PAPER));
 
   const left = hingeAt('flap_left', -SIZE / 2);
-  left.add(sheet('flap_left_sheet', rect(-SIZE, -SIZE, 0, SIZE), { top: 'vermilion' }));
+  left.add(sheet('flap_left_sheet', rect(-SIZE, -SIZE, 0, SIZE), PAPER));
   body.add(left);
 
   const right = hingeAt('flap_right', SIZE / 2);
-  right.add(sheet('flap_right_sheet', rect(0, -SIZE, SIZE, SIZE), { top: 'vermilion' }));
+  right.add(sheet('flap_right_sheet', rect(0, -SIZE, SIZE, SIZE), PAPER));
   body.add(right);
 
   // A hinge on a hinge: the tip has to follow the flap it hangs from.
   const tip = hingeAt('tip', SIZE);
-  tip.add(sheet('tip_sheet', rect(0, -SIZE, SIZE * 0.5, SIZE), { top: 'vermilion' }));
+  tip.add(sheet('tip_sheet', rect(0, -SIZE, SIZE * 0.5, SIZE), PAPER));
   right.add(tip);
 
   body.add(socketNode('socket_seat', 0, 0.01, 0));

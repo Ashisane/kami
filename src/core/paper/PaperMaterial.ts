@@ -101,13 +101,16 @@ const FRAGMENT_NORMAL = /* glsl */ `
   normal = normalize(normal + (normalMatrix * paperGradient) * uGrainStrength);
 `;
 
-// Sun hitting the far side of a sheet glows through it. Deliberately ignores
-// shadows: thin paper with a lit back is the cue that sells the material.
+// Sun hitting the far side of a sheet glows through it, and the thick fibres
+// block it, so they show as dark silhouettes. Uses the flat normal because
+// light passing through a sheet does not care about surface bumps. Ignores
+// shadows on purpose: a lit back is the cue that sells the material.
 const FRAGMENT_TRANSLUCENT = /* glsl */ `
   #if NUM_DIR_LIGHTS > 0
-    float paperBack = saturate(dot(-normal, directionalLights[0].direction));
+    float paperBack = saturate(dot(-nonPerturbedNormal, directionalLights[0].direction));
+    float paperThin = max(0.2, 1.2 - 0.55 * smoothstep(0.3, 0.68, paperSurface.b) - 0.5 * paperMottle.b);
     reflectedLight.directDiffuse += material.diffuseColor * directionalLights[0].color
-      * paperBack * uTranslucency * RECIPROCAL_PI;
+      * paperBack * paperThin * uTranslucency * RECIPROCAL_PI;
   #endif
 `;
 

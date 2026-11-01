@@ -1,0 +1,42 @@
+:root {
+  /* Type. Potta One is the voice of the game; Kiwi Maru does the reading. */
+  --font-display: 'Potta One', 'Kiwi Maru', serif;
+  --font-body: 'Kiwi Maru', 'Hiragino Maru Gothic ProN', serif;
+
+  /* Paper and ink */
+  --paper: #f6efdf;
+  --paper-deep: #ebe1cc;
+  --paper-edge: #d9ccb2;
+  --ink: #2b2420;
+  --ink-soft: #6b5f53;
+  --ink-faint: #a0937f;
+
+  /* Accents, matched to the paper stocks */
+  --vermilion: #d93a24;
+  --vermilion-deep: #a92712;
+  --marigold: #f2ad2f;
+  --teal: #1f8c86;
+  --indigo: #2f4f9e;
+  --sakura: #ee93a8;
+  --moss: #74a748;
+
+  /* Shadows sit low and warm, like a sheet resting on a desk */
+  --lift-1: 0 1px 0 rgb(255 255 255 / 0.6) inset, 0 1px 2px rgb(50 30 10 / 0.3);
+  --lift-2: 0 1px 1px rgb(50 30 10 / 0.28), 0 6px 14px -4px rgb(40 25 10 / 0.36), 0 18px 36px -14px rgb(30 20 8 / 0.42);
+
+  /* An uneven scissor cut, instead of a perfect CSS rounded rectangle */
+  --cut: 4px 2px 5px 3px / 3px 5px 2px 4px;
+
+  /* Fibre noise, generated, so there is no image to load */
+  --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75 0.42' numOctaves='3' seed='4'/%3E%3CfeColorMatrix values='0 0 0 0 0.33 0 0 0 0 0.25 0 0 0 0 0.15 0 0 0 0.42 -0.1'/%3E%3C/filter%3E%3Crect width='220' height='220' filter='url(%23n)'/%3E%3C/svg%3E");
+
+  /* Motion */
+  --spring: linear(0, 0.009, 0.035 2.1%, 0.141, 0.281 6.7%, 0.723 12.9%, 0.938 16.7%, 1.017, 1.077, 1.121, 1.149 24.3%, 1.159, 1.163, 1.161, 1.154 29.9%, 1.129 32.8%, 1.051 39.6%, 1.017 43.1%, 0.991, 0.977 51%, 0.974 53.8%, 0.975 57.1%, 0.997 69.8%, 1.003 76.9%, 1.004 83.8%, 1);
+  --snap: cubic-bezier(0.2, 0.9, 0.3, 1.25);
+  --quick: 130ms;
+  --settle: 460ms;
+
+  --gutter: 14px;
+  --rail-width: 266px;
+  --inspector-width: 318px;
+}

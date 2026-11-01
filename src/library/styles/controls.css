@@ -1,0 +1,222 @@
+/* Buttons squash on press and spring back on release. */
+.btn {
+  flex: 1;
+  padding: 7px 12px;
+  background: var(--paper-deep);
+  border-radius: var(--cut);
+  box-shadow: var(--lift-1);
+  font-weight: 500;
+  transition: transform var(--settle) var(--spring), background var(--quick);
+}
+.btn:hover {
+  background: #e4d8bf;
+  transform: translateY(-1px) rotate(-0.5deg);
+}
+.btn:active {
+  transform: scale(1.04, 0.9);
+  transition-duration: 60ms;
+}
+.btn.stamped {
+  animation: stamp 420ms var(--spring);
+}
+
+/* Chips are small torn labels. */
+.chip {
+  padding: 3px 9px;
+  border-radius: var(--cut);
+  color: var(--ink-soft);
+  white-space: nowrap;
+  text-transform: capitalize;
+  transition: transform var(--settle) var(--spring), background var(--quick), color var(--quick);
+}
+.chip:hover {
+  color: var(--ink);
+  background: var(--paper-deep);
+}
+.chip:active {
+  transform: scale(1.07, 0.88);
+  transition-duration: 60ms;
+}
+.chip.on {
+  background: var(--ink);
+  color: var(--paper);
+}
+
+.segmented {
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  background: var(--paper-deep);
+  border-radius: var(--cut);
+  box-shadow: inset 0 1px 2px rgb(50 30 10 / 0.24);
+}
+.segment {
+  flex: 1;
+  padding: 3px 11px;
+  border-radius: var(--cut);
+  color: var(--ink-soft);
+  white-space: nowrap;
+  transition: transform var(--settle) var(--spring), color var(--quick);
+}
+.segment:hover {
+  color: var(--ink);
+}
+.segment:active {
+  transform: scale(1.06, 0.9);
+  transition-duration: 60ms;
+}
+.segment.on {
+  background: var(--paper);
+  color: var(--vermilion-deep);
+  font-weight: 500;
+  box-shadow: var(--lift-1);
+}
+
+/* Slider: a strip of paper with a stamp riding along it. */
+.field {
+  display: block;
+  margin-top: 9px;
+}
+.field-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+.field-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.field-end {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.field-label {
+  color: var(--ink-soft);
+}
+.field-value {
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.slider {
+  --fill: 50%;
+  appearance: none;
+  display: block;
+  width: 100%;
+  height: 20px;
+  margin: 0;
+  background: none;
+  cursor: grab;
+}
+.slider:active {
+  cursor: grabbing;
+}
+.slider::-webkit-slider-runnable-track {
+  height: 5px;
+  border-radius: 3px;
+  background: linear-gradient(90deg, var(--vermilion) var(--fill), var(--paper-edge) var(--fill));
+}
+.slider::-webkit-slider-thumb {
+  appearance: none;
+  width: 15px;
+  height: 15px;
+  margin-top: -5px;
+  border-radius: 50%;
+  background: var(--paper);
+  border: 2.5px solid var(--vermilion);
+  box-shadow: 0 1px 2px rgb(50 30 10 / 0.4);
+  transition: transform var(--settle) var(--spring);
+}
+.slider:hover::-webkit-slider-thumb {
+  transform: scale(1.14);
+}
+.slider:active::-webkit-slider-thumb {
+  transform: scale(1.28, 1.06);
+}
+
+.color {
+  appearance: none;
+  width: 30px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+}
+.color::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+.color::-webkit-color-swatch {
+  border: 0;
+  border-radius: var(--cut);
+  box-shadow: var(--lift-1);
+}
+
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-top: 8px;
+  cursor: pointer;
+}
+.toggle input {
+  position: absolute;
+  opacity: 0;
+}
+.toggle-track {
+  flex: none;
+  width: 33px;
+  height: 19px;
+  padding: 2px;
+  border-radius: 10px;
+  background: var(--paper-edge);
+  box-shadow: inset 0 1px 2px rgb(50 30 10 / 0.3);
+  transition: background var(--quick);
+}
+.toggle-thumb {
+  display: block;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: var(--paper);
+  box-shadow: 0 1px 2px rgb(50 30 10 / 0.45);
+  transition: transform var(--settle) var(--spring);
+}
+.toggle input:checked + .toggle-track {
+  background: var(--teal);
+}
+.toggle input:checked + .toggle-track .toggle-thumb {
+  transform: translateX(14px);
+}
+.toggle input:focus-visible + .toggle-track {
+  outline: 2px solid var(--indigo);
+  outline-offset: 2px;
+}
+
+.search {
+  width: 100%;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: var(--cut);
+  background: var(--paper-deep);
+  box-shadow: inset 0 1px 2px rgb(50 30 10 / 0.24);
+}
+.search::placeholder {
+  color: var(--ink-faint);
+}
+
+.button-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+@keyframes stamp {
+  0% {
+    transform: scale(1.3) rotate(-4deg);
+    opacity: 0.5;
+  }
+}

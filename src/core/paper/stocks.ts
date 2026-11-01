@@ -28,31 +28,31 @@ export interface PaperStock {
 type Tuning = Omit<PaperStock, 'id' | 'name' | 'color' | 'fibreColor'>;
 
 const FINE: Tuning = {
-  roughness: 0.82,
-  grainScale: 1.5,
-  grainStrength: 0.34,
+  roughness: 0.84,
+  grainScale: 0.85,
+  grainStrength: 0.14,
   formation: 0.05,
-  fleck: 0.02,
-  threads: 0.07,
-  translucency: 0.3,
+  fleck: 0.03,
+  threads: 0.1,
+  translucency: 0.55,
 };
 const WASHI: Tuning = {
   roughness: 0.9,
-  grainScale: 1.9,
-  grainStrength: 0.46,
-  formation: 0.08,
-  fleck: 0.05,
-  threads: 0.5,
-  translucency: 0.5,
+  grainScale: 1.1,
+  grainStrength: 0.18,
+  formation: 0.07,
+  fleck: 0.06,
+  threads: 0.34,
+  translucency: 0.9,
 };
 const CARD: Tuning = {
-  roughness: 0.93,
-  grainScale: 1.2,
-  grainStrength: 0.6,
-  formation: 0.08,
-  fleck: 0.32,
-  threads: 0.14,
-  translucency: 0.08,
+  roughness: 0.94,
+  grainScale: 0.75,
+  grainStrength: 0.24,
+  formation: 0.09,
+  fleck: 0.3,
+  threads: 0.12,
+  translucency: 0.12,
 };
 
 export const PAPER_STOCKS = [
