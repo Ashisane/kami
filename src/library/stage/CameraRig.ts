@@ -43,7 +43,7 @@ export class CameraRig {
     bounds.getCenter(this.center);
     const radius = Math.max(0.35, size.length() / 2);
     const halfFov = MathUtils.degToRad(this.camera.fov / 2);
-    this.distance = (radius / Math.sin(halfFov)) * 0.92;
+    this.distance = (radius / Math.sin(halfFov)) * 1.15;
     this.view(this.angle, instant);
   }
 
