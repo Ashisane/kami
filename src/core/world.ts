@@ -4,7 +4,7 @@
  */
 export const WORLD = {
   /** Height of a player character, used by the library's scale reference. */
-  playerHeight: 1.6,
+  playerHeight: 1,
   /** Thickness of a standard sheet. Exaggerated from real paper so edges read on screen. */
   sheetThickness: 0.014,
 } as const;

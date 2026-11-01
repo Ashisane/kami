@@ -16,8 +16,8 @@ function stockOf(id: string): PaperStock {
   return stock;
 }
 
-export function paper(id: StockId, options: { smooth?: boolean } = {}): PaperMaterial {
-  const key = `${id}:${options.smooth ? 'smooth' : 'flat'}`;
+export function paper(id: StockId, options: { smooth?: boolean; sheet?: boolean } = {}): PaperMaterial {
+  const key = `${id}:${options.sheet ? 'sheet' : options.smooth ? 'smooth' : 'flat'}`;
   let material = materials.get(key);
   if (!material) {
     material = new PaperMaterial(stockOf(id), options);

@@ -10,6 +10,9 @@ import type { PaperStock } from './stocks';
  * glued to the paper while it folds, whether by hinge, skin or morph. Flat
  * facets project along their own plane, so grain never stretches on a slope.
  *
+ * Sheet mode is for paper whose vertices move every frame. There the rest pose
+ * arrives as a `paperUv` attribute: where each point sits on the flat sheet.
+ *
  * Shared by every instance, so these uniforms are swapped by reference.
  */
 const grain: { surface: { value: Texture | null }; mottle: { value: Texture | null } } = {
@@ -23,16 +26,25 @@ export function setPaperGrain(surface: Texture, mottle: Texture): void {
 }
 
 const VERTEX_COMMON = /* glsl */ `
-  varying vec3 vPaperPos;
-  #ifndef FLAT_SHADED
-    varying vec3 vPaperNormal;
+  #ifdef PAPER_SHEET
+    attribute vec2 paperUv;
+    varying vec2 vPaperUv;
+  #else
+    varying vec3 vPaperPos;
+    #ifndef FLAT_SHADED
+      varying vec3 vPaperNormal;
+    #endif
   #endif
 `;
 
 const VERTEX_BEGIN = /* glsl */ `
-  vPaperPos = position;
-  #ifndef FLAT_SHADED
-    vPaperNormal = normal;
+  #ifdef PAPER_SHEET
+    vPaperUv = paperUv;
+  #else
+    vPaperPos = position;
+    #ifndef FLAT_SHADED
+      vPaperNormal = normal;
+    #endif
   #endif
 `;
 
@@ -47,21 +59,29 @@ const FRAGMENT_COMMON = /* glsl */ `
   uniform float uTranslucency;
   uniform vec3 uFibreColor;
   uniform mat3 normalMatrix;
-  varying vec3 vPaperPos;
-  #ifndef FLAT_SHADED
-    varying vec3 vPaperNormal;
+  #ifdef PAPER_SHEET
+    varying vec2 vPaperUv;
+  #else
+    varying vec3 vPaperPos;
+    #ifndef FLAT_SHADED
+      varying vec3 vPaperNormal;
+    #endif
   #endif
 `;
 
 // Runs at <color_fragment>. Leaves paperSurface, paperMottle and paperGradient
 // in scope for the normal step that follows.
 const FRAGMENT_COLOR = /* glsl */ `
-  vec3 paperP = vPaperPos / uGrainScale;
   vec4 paperSurface;
   vec4 paperMottle;
   vec3 paperGradient;
 
-  #ifdef FLAT_SHADED
+  #ifdef PAPER_SHEET
+    vec2 paperUv = vPaperUv / uGrainScale;
+    paperSurface = texture2D(uPaperSurface, paperUv);
+    paperMottle = texture2D(uPaperMottle, paperUv);
+  #elif defined(FLAT_SHADED)
+    vec3 paperP = vPaperPos / uGrainScale;
     vec3 paperN = normalize(cross(dFdx(vPaperPos), dFdy(vPaperPos)) + vec3(1e-9));
     vec3 paperUp = abs(paperN.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
     vec3 paperT = normalize(cross(paperUp, paperN));
@@ -72,6 +92,7 @@ const FRAGMENT_COLOR = /* glsl */ `
     vec2 paperG = paperSurface.xy * 2.0 - 1.0;
     paperGradient = paperT * paperG.x + paperB * paperG.y;
   #else
+    vec3 paperP = vPaperPos / uGrainScale;
     vec3 paperW = pow(abs(normalize(vPaperNormal)), vec3(4.0));
     paperW /= paperW.x + paperW.y + paperW.z;
     vec4 sx = texture2D(uPaperSurface, paperP.zy);
@@ -97,8 +118,23 @@ const FRAGMENT_ROUGHNESS = /* glsl */ `
   roughnessFactor = clamp(roughnessFactor + (0.5 - paperSurface.b) * 0.16, 0.0, 1.0);
 `;
 
+// Sheet mode builds its surface directions from screen derivatives, because the
+// paper is moving and has no fixed frame to rotate a rest gradient through.
 const FRAGMENT_NORMAL = /* glsl */ `
-  normal = normalize(normal + (normalMatrix * paperGradient) * uGrainStrength);
+  #ifdef PAPER_SHEET
+    vec3 paperDx = dFdx(-vViewPosition);
+    vec3 paperDy = dFdy(-vViewPosition);
+    vec2 paperUvDx = dFdx(paperUv);
+    vec2 paperUvDy = dFdy(paperUv);
+    vec3 paperT = paperDx * paperUvDy.y - paperDy * paperUvDx.y;
+    vec3 paperB = paperDy * paperUvDx.x - paperDx * paperUvDy.x;
+    float paperScale = max(dot(paperT, paperT), dot(paperB, paperB));
+    paperScale = paperScale > 0.0 ? inversesqrt(paperScale) : 0.0;
+    vec2 paperG = paperSurface.xy * 2.0 - 1.0;
+    normal = normalize(normal + (paperT * paperG.x + paperB * paperG.y) * paperScale * uGrainStrength);
+  #else
+    normal = normalize(normal + (normalMatrix * paperGradient) * uGrainStrength);
+  #endif
 `;
 
 // Sun hitting the far side of a sheet glows through it, and the thick fibres
@@ -141,9 +177,10 @@ export class PaperMaterial extends MeshStandardMaterial {
     uFibreColor: { value: new Color() },
   };
 
-  constructor(stock: PaperStock, options: { smooth?: boolean } = {}) {
-    super({ metalness: 0, flatShading: !options.smooth, side: DoubleSide });
+  constructor(stock: PaperStock, options: { smooth?: boolean; sheet?: boolean } = {}) {
+    super({ metalness: 0, flatShading: !options.smooth && !options.sheet, side: DoubleSide });
     this.stockId = stock.id;
+    if (options.sheet) this.defines = { ...this.defines, PAPER_SHEET: '' };
     // The name doubles as the glTF material convention: see docs/ASSET_PIPELINE.md.
     this.name = `paper:${stock.id}`;
     this.applyStock(stock);
@@ -151,7 +188,7 @@ export class PaperMaterial extends MeshStandardMaterial {
       Object.assign(shader.uniforms, this.paperUniforms);
       patch(shader);
     };
-    this.customProgramCacheKey = () => 'kami-paper-1';
+    this.customProgramCacheKey = () => (options.sheet ? 'kami-paper-sheet-1' : 'kami-paper-1');
   }
 
   applyStock(stock: PaperStock): void {
