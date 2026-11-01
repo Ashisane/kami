@@ -35,6 +35,7 @@ export function slider({ label, min, max, step, value, format = String, onInput 
     paint();
     onInput(Number(input.value));
   });
+  input.addEventListener('sync', paint);
   paint();
   return h('label.field', {}, h('span.field-head', {}, h('span.field-label', {}, label), readout), input);
 }

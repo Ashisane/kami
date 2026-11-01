@@ -65,7 +65,8 @@ let r0;
 try {
   await page.goto(server.resolvedUrls?.local[0] ?? 'http://localhost:5198');
   await page.waitForFunction(() => document.documentElement.dataset.ready === 'true', undefined, { timeout: 120000 });
-  await wait(600);
+  // The camera glides into place on load, and aiming the mouse mid-glide would miss.
+  await wait(3000);
   check('opens on the sheet in the Fold Lab', (await lab())?.tallest === 1);
   await shot('start');
 
@@ -80,13 +81,13 @@ try {
   await pin(4.6, -4.6);
   await pin(4.6, 4.6);
   check('clicking plants two pins', (await lab()).pins === 2);
-  await drag([-4.8, 0.3], [4.8, 0.3], { midShot: 'dragging' });
+  await drag([-4.8, 0.3], [4.8, 0.3], { hold: 900, midShot: 'dragging' });
   await wait(250);
   await shot('landing');
   await wait(1000);
   let r = await lab();
   console.log('  fold log:', JSON.stringify(r.log));
-  check('dragging an edge across folds the sheet in half', r.tallest === 2 && r.folds === 1 && r.log[0]?.at === 5, r.message);
+  check('dragging an edge across folds the sheet in half', r.tallest === 2 && r.folds === 1 && r.log[0]?.at === 5, `${JSON.stringify(r.log)} ${r.message}`);
   check('both anchors keep holding after the fold', r.pins === 2, `${r.pins} pins`);
   await page.keyboard.press('Escape');
   await wait(500);
@@ -151,6 +152,45 @@ try {
   r = await lab();
   check('hardening freezes the sheet', r.rigidity === 1);
   await shot('hardened');
+
+  // 6. The real goal: open a folded dart and a boat into 3D, and harden them.
+  const build = async (name, recipe, folds, grab, to, lift) => {
+    await page.keyboard.press('r');
+    await wait(300);
+    await page.locator('.inspector .slider').first().fill('0');
+    await page.locator('.chip', { hasText: recipe }).click();
+    await page.waitForFunction((n) => window.kami.lab().folds >= n, folds, { timeout: 15000 });
+    await wait(1400);
+    await drag(grab, to, { hold: 900, lift, midShot: `${name}-opening` });
+    await wait(900);
+    await page.locator('.inspector .slider').first().fill('1');
+    await wait(120);
+    await page.keyboard.press('Escape');
+    await wait(1200);
+    await shot(`${name}-solid`);
+    const result = await lab();
+    check(`${name} opens into 3D and hardens`, result.rigidity === 1 && result.folds >= 3 && result.height > 1.2, `${result.folds} folds, stands ${result.height.toFixed(1)} m tall`);
+  };
+  await build('dart', 'Paper Dart', 3, [-4.7, 2], [-3.4, 2], 1600);
+  await build('boat', 'Paper Boat', 5, [-4.6, 0], [-3.4, 0], 1600);
+
+  // 7. Hardened paper refuses to fold.
+  const foldsBefore = (await lab()).folds;
+  await drag([-4.7, -2], [-1, -2], { hold: 400 });
+  await wait(500);
+  check('hardened paper no longer folds', (await lab()).folds === foldsBefore);
+
+  // 8. The finer grid, on the real machine.
+  await page.keyboard.press('Escape');
+  await page.locator('.segment', { hasText: '0.5 m cells' }).click();
+  await wait(900);
+  await pin(4.6, -4.6);
+  await pin(4.6, 4.6);
+  await drag([-4.8, 0.3], [4.8, 0.3], { hold: 900, midShot: 'fine-grid' });
+  await wait(1400);
+  r = await lab();
+  check('the 0.5 m grid folds too', r.faces === 3200 && r.folds === 1 && r.tallest === 2, `${r.faces} faces, ${r.message}`);
+  console.log('fine grid:', r.simulationMs.toFixed(2), 'ms sim,', await page.locator('.status').textContent());
 
   console.log('readout:', JSON.stringify({ ms: r.simulationMs.toFixed(2), tris: r.triangles }));
   console.log('status:', await page.locator('.status').textContent());

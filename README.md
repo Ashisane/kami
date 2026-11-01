@@ -8,9 +8,19 @@ npm install
 npm run dev
 ```
 
-Opens the Asset Library at http://localhost:5173.
+Opens the Fold Lab at http://localhost:5173.
 
-| Key | Action |
+| In the Fold Lab | Action |
+| --- | --- |
+| Click paper | Pin it in place (three pins) |
+| Drag paper over, let go | Fold it |
+| Wheel up while dragging | Lift it, so it stays held when you let go |
+| Shift + drag | Grip every layer |
+| Right click a pin / Esc | Remove a pin / all pins |
+| X | Cut tool |
+| Z / R | Step back / fresh sheet |
+
+| In the library | Action |
 | --- | --- |
 | Space | Play or pause the clip |
 | 1 2 3 4 | Paper, clay, wire, normals |

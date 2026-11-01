@@ -71,6 +71,8 @@ export interface LabReadout {
   log: readonly FoldStep[];
   rigidity: number;
   cellMetres: number;
+  /** How far the paper rises off the ground, in metres. */
+  height: number;
 }
 
 export class FoldLab {
@@ -358,7 +360,7 @@ export class FoldLab {
 
     const stack = piece.book.stackOf(face);
     const seeds = wholeStack ? [...stack] : [face];
-    if (!wholeStack && stack.length > 1 && hit.fromAbove && piece.peel(face)) this.regrip(bench);
+    if (!wholeStack && this.rigidity === 0 && stack.length > 1 && hit.fromAbove && piece.peel(face)) this.regrip(bench);
 
     const mesh = piece.soft.mesh;
     const liveTri = mesh.faceTri[face] as number;
@@ -405,6 +407,7 @@ export class FoldLab {
       const tri = soft.mesh.faceTri[grip.face] as number;
       const [b0, b1, b2] = this.barycentric(bench, tri, grip.flat);
       const held = grip.pin;
+      soft.removePin(held);
       grip.pin = soft.addPin(tri, b0, b1, b2);
       grip.pin.x = held.x;
       grip.pin.y = held.y;
@@ -434,14 +437,17 @@ export class FoldLab {
   private updateGuess(dt: number): void {
     const grip = this.dragging;
     if (!grip) return;
-    if (this.liftExtra >= HOLD_LIFT) {
+    // Hardened paper no longer folds, and paper held up is not trying to.
+    if (this.liftExtra >= HOLD_LIFT || this.rigidity > 0) {
       this.guess = null;
       this.ghost.hide();
       return;
     }
     const { piece } = grip.bench;
     const still = this.moving ?? grip.near;
-    const flatNow = piece.worldToFlat(grip.pin, still);
+    // The fold follows the hand, not the paper trailing behind it, so what you
+    // aim at is what you get, however slow the frame was.
+    const flatNow = piece.worldToFlat(grip.target, still);
     this.guess = guessFold(piece, grip.flat, flatNow);
     const guess = this.guess;
     if (!guess) {
@@ -580,7 +586,7 @@ export class FoldLab {
     this.queue = [];
     this.rigidity = 0;
     this.addBench(new SheetPiece(definition));
-    this.setMessage('A fresh sheet.');
+    this.setMessage(`A fresh sheet, ${definition.size / definition.cells} m between fold lines.`);
   }
 
   setCells(cells: number): void {
@@ -695,7 +701,11 @@ export class FoldLab {
 
   setRigidity(rigidity: number): void {
     this.rigidity = rigidity;
-    for (const bench of this.benches) bench.piece.harden(rigidity);
+    for (const bench of this.benches) {
+      bench.piece.settle();
+      this.regrip(bench);
+      bench.piece.harden(rigidity);
+    }
     this.notify();
   }
 
@@ -758,6 +768,15 @@ export class FoldLab {
     pin.z = z;
   }
 
+  private height(): number {
+    let top = 0;
+    for (const bench of this.benches) {
+      const { x } = bench.piece.soft;
+      for (let i = 1; i < x.length; i += 3) top = Math.max(top, x[i] as number);
+    }
+    return top;
+  }
+
   readout(): LabReadout {
     const first = this.benches[0];
     return {
@@ -773,6 +792,7 @@ export class FoldLab {
       log: this.log,
       rigidity: this.rigidity,
       cellMetres: this.definition.size / this.definition.cells,
+      height: this.height(),
     };
   }
 }

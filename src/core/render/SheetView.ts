@@ -300,12 +300,14 @@ export class SheetView {
     geometry.setAttribute('normal', this.normals);
     geometry.setAttribute('paperUv', new BufferAttribute(Float32Array.from(uv), 2));
 
-    const all: number[] = [];
+    const all = new Uint32Array(indices.reduce((sum, list) => sum + list.length, 0));
+    let offset = 0;
     indices.forEach((list, slot) => {
-      geometry.addGroup(all.length, list.length, slot);
-      all.push(...list);
+      geometry.addGroup(offset, list.length, slot);
+      all.set(list, offset);
+      offset += list.length;
     });
-    geometry.setIndex(all);
+    geometry.setIndex(new BufferAttribute(all, 1));
 
     this.mesh?.geometry.dispose();
     if (this.mesh) this.group.remove(this.mesh);

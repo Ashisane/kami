@@ -1,6 +1,10 @@
 # Asset pipeline
 
-Everything in the game is an asset, and an asset is a contract. The model can
+There are two kinds of asset. **Models** have a fixed shape and clips, and this
+document covers them. **Sheets** (`*.sheet.ts`) are living paper shaped by
+players, and `docs/PAPER.md` covers those.
+
+Every model is an asset, and an asset is a contract. The model can
 change completely as long as the contract still holds.
 
 ## Adding an asset

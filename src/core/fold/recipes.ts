@@ -76,22 +76,22 @@ export const RECIPES: readonly Recipe[] = [
   },
   {
     id: 'plane',
-    name: 'Paper plane',
+    name: 'Paper dart',
     steps: [
       { kind: 'sum', at: 5, side: -1, grip: 'top' },
       { kind: 'diff', at: 5, side: 1, grip: 'top' },
       { kind: 'x', at: half, side: 1, grip: 'all' },
-      { kind: 'x', at: 3.5, side: -1, grip: 'top' },
-      { kind: 'x', at: 3.5, side: -1, grip: 'bottom', landing: { kind: 'under' } },
     ],
   },
   {
-    id: 'hat',
-    name: 'Boat hull, ready to open',
+    id: 'boat',
+    name: 'Paper boat',
     steps: [
-      { kind: 'z', at: half, side: 1, grip: 'all' },
-      { kind: 'diff', at: 0, side: -1, grip: 'all' },
-      { kind: 'sum', at: 10, side: 1, grip: 'all' },
+      { kind: 'sum', at: 5, side: -1, grip: 'top' },
+      { kind: 'sum', at: 15, side: 1, grip: 'top' },
+      { kind: 'diff', at: 5, side: 1, grip: 'top' },
+      { kind: 'diff', at: -5, side: -1, grip: 'top' },
+      { kind: 'x', at: half, side: 1, grip: 'all' },
     ],
   },
 ];

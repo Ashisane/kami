@@ -38,9 +38,20 @@ export function foldPanel({ stage }: LibraryContext): HTMLElement {
   if (!lab) return emptyNote('No sheet here', 'Choose a sheet from Living paper to open the Fold Lab.');
 
   const body = h('div');
-  readoutPanel(lab, body);
+  const rigidity = slider({ label: 'Rigidity', min: 0, max: 1, step: 0.05, value: lab.readout().rigidity, format: round(2), onInput: (value) => lab.setRigidity(value) });
+  const rigidityInput = rigidity.querySelector('input') as HTMLInputElement;
+  const refresh = () => {
+    readoutPanel(lab, body);
+    // A fresh sheet is soft again, so the slider has to follow it back down.
+    const value = lab.readout().rigidity;
+    if (Number(rigidityInput.value) !== value) {
+      rigidityInput.value = String(value);
+      rigidityInput.dispatchEvent(new Event('sync'));
+    }
+  };
+  refresh();
   const unsubscribe = lab.subscribe(() => {
-    if (body.isConnected) readoutPanel(lab, body);
+    if (body.isConnected) refresh();
     else unsubscribe();
   });
 
@@ -64,8 +75,8 @@ export function foldPanel({ stage }: LibraryContext): HTMLElement {
     ),
     section(
       'Harden',
-      slider({ label: 'Rigidity', min: 0, max: 1, step: 0.05, value: lab.readout().rigidity, format: round(2), onInput: (value) => lab.setRigidity(value) }),
-      h('p.panel-note', {}, 'Freezes the shape the paper holds right now. 1 is one solid body.'),
+      rigidity,
+      h('p.panel-note', {}, 'Freezes the shape the paper holds right now, and it stops folding. 1 is one solid body.'),
     ),
     section('Recipes', h('div.stock-chips', {}, RECIPES.map((recipe) => h('button.chip', { type: 'button', onclick: () => lab.playRecipe(recipe.id) }, recipe.name)))),
     section(

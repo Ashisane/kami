@@ -7,22 +7,21 @@
 - Asset Library: catalogue, stage, motion, collision, paper and light panels
 - Capture tool, tests, GLB round trip
 
-## Next: bare minimum artifacts
+- The paper: Fold Book, Soft Sheet, Fold Lab, cut, harden (see `docs/PAPER.md`)
 
-Only what is needed to test the mechanics, each proven in the library first.
+## Next: finish the paper
+
+1. Owner plays the Fold Lab by hand and critiques the feel
+2. Make a convincing boat: it opens today, but rests on one side of its hull
+3. Pick the final grid size from that playtest
+
+## Then: mechanics
 
 1. Player character blockout, with idle, walk, jump, fold and carry clips
-2. Blank sheet of paper, the raw material of every fold
-3. Paper plane, folded from a sheet, with a glide clip
-4. Paper boat, folded from a sheet, with a float clip
-5. Terrain pieces: ground, cliff edge, water
-
-## Then: mechanics, single player
-
-1. Character controller and physics, using the collider data
-2. The fold interaction, the core of the game
+2. Paper meets the world: hardened paper becomes a physics body
 3. Plane gliding and boat floating
-4. A small test level: walk, fold a plane, leap a gap, fold a boat, cross water
+4. Terrain pieces: ground, cliff edge, water
+5. A small test level: walk, fold a plane, leap a gap, fold a boat, cross water
 
 ## Later
 

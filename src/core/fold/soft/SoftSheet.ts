@@ -79,6 +79,8 @@ export class SoftSheet {
   private readonly grid = new Map<number, number[]>();
   private readonly centre: Float64Array;
 
+  private readonly contactCell: number;
+
   private solid: Float64Array | null = null;
   private readonly orientation: Quat = [0, 0, 0, 1];
   private readonly covariance = new Float64Array(9);
@@ -107,6 +109,8 @@ export class SoftSheet {
       }
     }
     if (initial) this.x.set(initial);
+
+    this.contactCell = Math.max(...mesh.edgeLength) * 1.1;
 
     const hinges = mesh.hinges.length / 4;
     this.hingeRest = new Float64Array(hinges);
@@ -320,7 +324,8 @@ export class SoftSheet {
   private findContacts(): void {
     const { tris, triCount } = this.mesh;
     const { x, centre, grid } = this;
-    const cell = 0.75;
+    // Sized from the triangles, so a finer grid is not comparing everything to everything.
+    const cell = this.contactCell;
     const key = (i: number, j: number, k: number) => (i + 512) * 1048576 + (j + 512) * 1024 + (k + 512);
     grid.clear();
     this.contactCount = 0;

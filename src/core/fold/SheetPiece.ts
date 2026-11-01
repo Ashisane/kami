@@ -73,15 +73,11 @@ export class SheetPiece {
     return out;
   }
 
-  private rebuild(positions: (mesh: ReturnType<typeof buildSoftMesh>) => Float64Array, keepVelocity = false): void {
-    const pins = this.soft.pins;
-    const old = this.soft;
+  /** Replaces the cloth. Pins hold triangles that no longer exist, so their owners must re-grip. */
+  private rebuild(positions: (mesh: ReturnType<typeof buildSoftMesh>) => Float64Array): void {
     const mesh = buildSoftMesh(this.book, this.definition.size, this.peeled);
     this.soft = new SoftSheet(mesh, this.solverSettings(), positions(mesh));
-    if (keepVelocity && old.v.length === this.soft.v.length) this.soft.v.set(old.v);
     this.revision++;
-    // Pins hold triangles that no longer exist, so whoever owns them must re-grip.
-    void pins;
   }
 
   /** Commits a fold. Refused folds change nothing and report why. */
@@ -179,21 +175,73 @@ export class SheetPiece {
     return { x: dx * ux + dy * uy + dz * uz, z: dx * vx + dy * vy + dz * vz, height: -(dx * nx + dy * ny + dz * nz) };
   }
 
-  /** Every face that lifts with this one: flat paper, up to the nearest crease. */
-  flapOf(face: number): Set<number> {
+  /** Flat paper connected to a face, stopping at every crease. */
+  private flatRegion(face: number): Set<number> {
     const { book } = this;
-    const flap = new Set([face]);
+    const region = new Set([face]);
     const todo = [face];
     while (todo.length) {
       const f = todo.pop() as number;
       for (let k = 0; k < 3; k++) {
         const g = book.neighbour[f * 3 + k] as number;
-        if (g < 0 || flap.has(g) || book.edgeBlocked(f, k) || book.flipped[g] !== book.flipped[f]) continue;
+        if (g < 0 || region.has(g) || book.edgeBlocked(f, k) || book.flipped[g] !== book.flipped[f]) continue;
+        region.add(g);
+        todo.push(g);
+      }
+    }
+    return region;
+  }
+
+  /** Which straight line a face's edge lies along, as a key. */
+  private edgeLine(f: number, k: number): string {
+    const { at } = this.book;
+    const n = (k + 1) % 3;
+    const ax = at[f * 6 + k * 2] as number, az = at[f * 6 + k * 2 + 1] as number;
+    const bx = at[f * 6 + n * 2] as number, bz = at[f * 6 + n * 2 + 1] as number;
+    if (ax === bx) return `x${ax}`;
+    if (az === bz) return `z${az}`;
+    return (bx - ax) * (bz - az) > 0 ? `d${ax - az}` : `s${ax + az}`;
+  }
+
+  /**
+   * Every face that lifts with this one. A flap turns on its longest crease, like
+   * the spine of a book, and anything folded into it on its other creases comes
+   * along. If that would be the whole piece, only the flat paper lifts.
+   */
+  flapOf(face: number): Set<number> {
+    const { book } = this;
+    const flat = this.flatRegion(face);
+
+    const crease = new Map<string, number>();
+    for (const f of flat) {
+      for (let k = 0; k < 3; k++) {
+        const g = book.neighbour[f * 3 + k] as number;
+        if (g < 0 || flat.has(g) || book.edgeBlocked(f, k)) continue;
+        const line = this.edgeLine(f, k);
+        crease.set(line, (crease.get(line) ?? 0) + 1);
+      }
+    }
+    let hinge = '';
+    let longest = 0;
+    for (const [line, length] of crease) {
+      if (length > longest) {
+        longest = length;
+        hinge = line;
+      }
+    }
+
+    const flap = new Set(flat);
+    const todo = [...flat];
+    while (todo.length) {
+      const f = todo.pop() as number;
+      for (let k = 0; k < 3; k++) {
+        const g = book.neighbour[f * 3 + k] as number;
+        if (g < 0 || flap.has(g) || book.edgeBlocked(f, k) || this.edgeLine(f, k) === hinge) continue;
         flap.add(g);
         todo.push(g);
       }
     }
-    return flap;
+    return flap.size === book.faces.length ? flat : flap;
   }
 
   /** Faces currently lifted off their stack. */

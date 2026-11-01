@@ -44,18 +44,28 @@ sockets and collider data. That is the whole point of `src/core/asset/types.ts`.
 If a task seems to need a model detail in game code, add a socket, a clip or a
 collider to the contract instead.
 
+## The paper system
+
+Paper is the core of the game. Read `docs/PAPER.md` before touching it. In short:
+the **Fold Book** is exact truth with no physics, the **Soft Sheet** is floppy
+cloth rebuilt from the Book after every fold. Never make rigid folds emerge from
+forces: that was tested and fails badly. Never let either side own the other's job.
+
 ## Layout
 
 ```
 src/core/        Engine. Must never import from library/ or game code.
   anim/          Easing, springs, clip baking
   asset/         The contract, registry, validation, glTF loading
+  fold/          The Fold Book, lattice, recipes, fold guide, SheetPiece
+  fold/soft/     The Soft Sheet solver, in typed arrays with no three.js
   fx/            Scraps, screen shake
   paper/         Grain bake, PaperMaterial, stocks, cut sheet geometry
-  render/        Renderer, post pipeline, quality tiers, lights
-src/assets/      One `*.asset.ts` per asset. Auto-registered: no list to edit.
-src/library/     The Asset Library app: stage, panels, styles.
-tools/           capture.mjs, the eyes of this project.
+  render/        Renderer, post pipeline, quality tiers, lights, sheet drawing
+  sim/           Fixed-step clock
+src/assets/      One `*.asset.ts` per model, one `*.sheet.ts` per sheet. Auto-registered.
+src/library/     The Asset Library app: stage, Fold Lab, panels, styles.
+tools/           capture.mjs and labcheck.mjs, the eyes of this project.
 tests/           Contract and motion tests.
 docs/            Art direction, asset pipeline, roadmap.
 ```
@@ -65,10 +75,12 @@ docs/            Art direction, asset pipeline, roadmap.
 ```
 npm run dev          Asset Library at localhost:5173
 npm run verify       Typecheck, tests, screenshots, GLB round trip, benchmark
+npm run check:lab    Plays the Fold Lab with a real mouse
 npm run capture -- --suite smoke
 npm run capture -- --asset <id> --clip <name> --time 0.6 --camera side --bare
 npm run capture -- --stock kraft --zoom 4 --lighting golden --bare
 npm run capture -- --turnaround <id>
+npm run capture -- --sheet sheet.standard --recipe plane --settle 40 --bare
 ```
 
 Run `npm run verify` before every commit. Screenshots land in `.shots/`.
@@ -95,6 +107,8 @@ repeats, baked textures shared across everything.
 - Three.js divides diffuse by pi, so light intensities near 3 mean full light.
 - glTF strips `.` and other characters from names, so node names are snake_case.
 - `GTAOPass` writes `scene.overrideMaterial` itself. Use `RenderPass.overrideMaterial`.
+- Never spread a mesh-sized array into a call (`push(...list)`). It overflows the stack.
+- Test what a player sees, not a proxy. A boat "passed" on fold count while flat.
 
 ## Writing commits
 
