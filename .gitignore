@@ -1,0 +1,15 @@
+node_modules/
+dist/
+.vite/
+*.local
+*.log
+
+# Screenshots from `npm run capture` are working output, not source.
+.shots/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+.idea/
