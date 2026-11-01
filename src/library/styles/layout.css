@@ -688,3 +688,15 @@
     display: none;
   }
 }
+
+.angle-tag {
+  position: absolute;
+  z-index: 5;
+  transform: translate(18px, -130%);
+  padding: 2px 10px 3px;
+  border-radius: 8px;
+  background: var(--ink);
+  color: var(--paper);
+  font: 400 20px/1.2 var(--font-display);
+  pointer-events: none;
+}

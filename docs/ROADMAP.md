@@ -7,7 +7,7 @@
 - Asset Library: catalogue, stage, motion, collision, paper and light panels
 - Capture tool, tests, GLB round trip
 
-- The paper: Fold Book, Soft Sheet, Fold Lab, cut, harden (see `docs/PAPER.md`)
+- The paper: Fold Book, Soft Sheet, Fold Lab, cut, finished crafts (see `docs/PAPER.md`)
 
 ## Next: finish the paper
 
@@ -18,7 +18,7 @@
 ## Then: mechanics
 
 1. Player character blockout, with idle, walk, jump, fold and carry clips
-2. Paper meets the world: hardened paper becomes a physics body
+2. Paper meets the world: a finished craft becomes a physics body
 3. Plane gliding and boat floating
 4. Terrain pieces: ground, cliff edge, water
 5. A small test level: walk, fold a plane, leap a gap, fold a boat, cross water

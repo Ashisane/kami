@@ -48,8 +48,6 @@ export interface Pin {
 const BEND_COMPLIANCE = 0.02;
 /** A made crease holds far harder than flat paper, so a fold stays shut. */
 const CREASE_COMPLIANCE = 0.0015;
-/** A crease fixed open holds its angle harder still, or a wing would sink under its own weight. */
-const FIXED_COMPLIANCE = 0.00005;
 /**
  * The sharpest an uncreased edge can bend. This gives paper a minimum bend
  * radius: it rolls where cloth would crumple, which is what stops it folding
@@ -91,8 +89,6 @@ export class SoftSheet {
   private readonly hingeRest: Float64Array;
   private readonly hingeCompliance: Float64Array;
   private readonly hingePrevious: Float64Array;
-  /** 1 where a crease has been fixed at an angle, instead of pulling shut. */
-  private readonly hingeFixed: Uint8Array;
   private readonly groundHeight: Float64Array;
 
   // Sides remembered per contact, so a layer that goes too far is pushed back the right way.
@@ -143,7 +139,6 @@ export class SoftSheet {
     this.hingeRest = new Float64Array(hinges);
     this.hingeCompliance = new Float64Array(hinges);
     this.hingePrevious = new Float64Array(hinges);
-    this.hingeFixed = new Uint8Array(hinges);
     this.applyStiffness();
     for (let h = 0; h < hinges; h++) {
       const angle = this.hingeAngle(h);
@@ -164,31 +159,8 @@ export class SoftSheet {
     for (let h = 0; h < this.hingeCompliance.length; h++) {
       const layers = hingeLayers[h] as number;
       // A crease is a line of weakness: thicker paper resists it only a little.
-      const crease = this.hingeFixed[h] ? FIXED_COMPLIANCE : CREASE_COMPLIANCE;
-      this.hingeCompliance[h] = hingeFolded[h] ? crease / layers : (BEND_COMPLIANCE * floppiness) / layers ** STACK_STIFFENING;
+      this.hingeCompliance[h] = hingeFolded[h] ? CREASE_COMPLIANCE / layers : (BEND_COMPLIANCE * floppiness) / layers ** STACK_STIFFENING;
     }
-  }
-
-  /** Bends a flap's creases for good at the angle they are at now, as real paper keeps a bend. */
-  fixFlap(flap: number): void {
-    const { hingeFlap, hingeFolded } = this.mesh;
-    for (let h = 0; h < this.hingeRest.length; h++) {
-      if (hingeFlap[h] !== flap || !hingeFolded[h]) continue;
-      this.hingeRest[h] = this.hingePrevious[h] as number;
-      this.hingeFixed[h] = 1;
-    }
-    this.applyStiffness();
-  }
-
-  /** Lets a flap's creases pull shut again. */
-  unfixFlap(flap: number): void {
-    const { hingeFlap, hingeFolded } = this.mesh;
-    for (let h = 0; h < this.hingeRest.length; h++) {
-      if (hingeFlap[h] !== flap || !hingeFolded[h]) continue;
-      this.hingeRest[h] = (this.hingePrevious[h] as number) < 0 ? -Math.PI : Math.PI;
-      this.hingeFixed[h] = 0;
-    }
-    this.applyStiffness();
   }
 
   private hingeAngle(h: number): number {

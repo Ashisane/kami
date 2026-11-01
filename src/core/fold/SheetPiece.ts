@@ -2,8 +2,10 @@ import type { SheetDefinition } from '../asset/sheetTypes';
 import { FoldBook } from './FoldBook';
 import type { FoldPlan, FoldRequest } from './FoldBook';
 import { applyOpen } from './recipes';
-import type { OpenStep, SpreadStep } from './recipes';
+import type { OpenStep } from './recipes';
 import type { ReshapeFailure } from './reshape';
+import { jointPoint, poseCraft, standOn, toWorld } from './craft';
+import type { Joint, Stance } from './craft';
 import { reflectX, reflectZ, sideOf, UNITS_PER_CELL } from './lattice';
 import type { MirrorLine } from './lattice';
 import { extractRotation, rotateInto } from './soft/rotation';
@@ -12,13 +14,6 @@ import { buildSoftMesh, metresPerUnit } from './soft/softMesh';
 import { CONTACT_GAP, SoftSheet } from './soft/SoftSheet';
 import type { SoftSettings } from './soft/SoftSheet';
 
-/** Paper lifted off its stack, turning on one crease. */
-interface Flap {
-  faces: ReadonlySet<number>;
-  /** True once its crease is bent for good, so it stays where it was left. */
-  fixed: boolean;
-}
-
 /**
  * One connected piece of paper: the exact Book plus the floppy cloth built from
  * it, kept in step. Everything that changes the paper goes through here. No
@@ -26,8 +21,10 @@ interface Flap {
  */
 export class SheetPiece {
   soft: SoftSheet;
-  /** Flaps lifted off their stacks right now. */
-  private flaps: Flap[] = [];
+  /** Paper lifted off its stacks right now. */
+  private flaps: ReadonlySet<number>[] = [];
+  /** Set once the paper is marked complete: it is then stiff plates on hinges. */
+  private finished: { joints: Joint[]; stance: Stance; lying: Stance } | null = null;
 
   /** Goes up whenever the cloth is rebuilt, so a view knows to rebuild too. */
   revision = 0;
@@ -63,7 +60,7 @@ export class SheetPiece {
   }
 
   step(dt: number): void {
-    this.soft.step(dt);
+    if (!this.finished) this.soft.step(dt);
   }
 
   setFloppiness(floppiness: number): void {
@@ -90,11 +87,8 @@ export class SheetPiece {
 
   /** Replaces the cloth. Pins hold triangles that no longer exist, so their owners must re-grip. */
   private rebuild(positions: (mesh: ReturnType<typeof buildSoftMesh>) => Float64Array): void {
-    const mesh = buildSoftMesh(this.book, this.definition.size, this.flaps.map((flap) => flap.faces));
+    const mesh = buildSoftMesh(this.book, this.definition.size, this.flaps);
     this.soft = new SoftSheet(mesh, this.solverSettings(), positions(mesh));
-    this.flaps.forEach((flap, i) => {
-      if (flap.fixed) this.soft.fixFlap(i);
-    });
     this.revision++;
   }
 
@@ -401,7 +395,7 @@ export class SheetPiece {
 
     const before = this.corners();
     const [nx, ny, nz] = this.surfaceUp();
-    this.flaps = [...this.flaps, { faces: flap, fixed: false }];
+    this.flaps = [...this.flaps, flap];
     const lift = CONTACT_GAP * 1.5 * (under ? -1 : 1);
     this.rebuild((mesh) => {
       const out = new Float64Array(mesh.vertexCount * 3);
@@ -419,93 +413,182 @@ export class SheetPiece {
     return true;
   }
 
-  /** Bends every flap still being pulled for good, at the angle it is held. Returns how many. */
-  fixFlaps(): number {
-    let count = 0;
-    this.flaps.forEach((flap, i) => {
-      if (flap.fixed) return;
-      flap.fixed = true;
-      this.soft.fixFlap(i);
-      count++;
-    });
-    return count;
-  }
-
-  /** Takes a fixed flap back in hand, so it can be moved. Returns false if this face is on none. */
-  unfix(face: number): boolean {
-    const i = this.flaps.findIndex((flap) => flap.fixed && flap.faces.has(face));
-    if (i < 0) return false;
-    (this.flaps[i] as Flap).fixed = false;
-    this.soft.unfixFlap(i);
-    return true;
-  }
-
-  /** True while a flap is lifted but not fixed: someone has it in hand. */
+  /** True while paper is lifted: someone has it in hand. */
   get pulling(): boolean {
-    return this.flaps.some((flap) => !flap.fixed);
-  }
-
-  get fixedFlaps(): number {
-    return this.flaps.filter((flap) => flap.fixed).length;
+    return this.flaps.length > 0;
   }
 
   /**
-   * Stands the paper up on its keel with its wings opened out, as hands would hold
-   * a plane. The Book does not change: this is shape, which only the cloth owns.
+   * The outermost paper that can turn with this face: the smallest free flap, on a
+   * crease that parts it from the rest. A wing has lock creases too, but turning on
+   * those would carry the whole body with it.
    */
-  spread(step: SpreadStep): boolean {
-    const { book, definition } = this;
-    const scale = (book.cells * UNITS_PER_CELL) / definition.size;
-    const axis = { across: step.hinge.kind, c: step.hinge.at * scale };
-    const hinge = `${axis.across}${axis.c}`;
-    const chosen = step.wings.map(({ at, under }) => {
-      const faces = this.turningOn(this.outerFaceAt(at[0] * scale, at[1] * scale, under), hinge, under);
-      return { faces, under };
-    });
-    if (chosen.some(({ faces, under }) => faces.size === book.faces.length || this.heldDown(faces, under))) return false;
-
-    // Which way the keel lies from the hinge: towards the paper that stays.
-    const hingeAt = this.toMetres(axis.c);
-    const stays = book.faces.filter((f) => !chosen.some((wing) => wing.faces.has(f)));
-    const across = stays.reduce((sum, f) => sum + (axis.across === 'x' ? (book.at[f * 6] as number) : (book.at[f * 6 + 1] as number)), 0) / stays.length;
-    const toKeel = this.toMetres(across) > hingeAt ? 1 : -1;
-
-    this.flaps = chosen.map((wing) => ({ faces: wing.faces, fixed: true }));
-    const flapOfVertex = (mesh: ReturnType<typeof buildSoftMesh>) => {
-      const owner = new Int32Array(mesh.vertexCount).fill(-1);
-      chosen.forEach((wing, i) => {
-        for (const f of wing.faces) for (let k = 0; k < 3; k++) owner[mesh.cornerVertex[f * 3 + k] as number] = i;
-      });
-      return owner;
-    };
-    const open = (step.angle * Math.PI) / 180;
-    this.rebuild((mesh) => {
-      const owner = flapOfVertex(mesh);
-      const out = new Float64Array(mesh.vertexCount * 3);
-      let middle = 0;
-      for (let v = 0; v < mesh.vertexCount; v++) middle += mesh.flat[v * 2 + (axis.across === 'x' ? 1 : 0)] as number;
-      middle /= mesh.vertexCount;
-      for (let v = 0; v < mesh.vertexCount; v++) {
-        const fx = mesh.flat[v * 2] as number, fz = mesh.flat[v * 2 + 1] as number;
-        const along = (axis.across === 'x' ? fz : fx) - middle;
-        const drop = ((axis.across === 'x' ? fx : fz) - hingeAt) * toKeel;
-        const wing = owner[v] as number;
-        const side = wing < 0 ? 0 : (chosen[wing] as { under: boolean }).under ? -1 : 1;
-        const down = wing < 0 ? drop : drop * Math.cos(open);
-        const out1 = wing < 0 ? 0 : drop * Math.sin(open) * side;
-        const i = v * 3;
-        if (axis.across === 'x') {
-          out[i] = out1 * toKeel;
-          out[i + 2] = along + middle;
-        } else {
-          out[i] = along + middle;
-          out[i + 2] = -out1 * toKeel;
-        }
-        out[i + 1] = step.height - down;
+  private jointAt(face: number, under: boolean): { faces: Set<number>; hinge: string } | null {
+    const { book } = this;
+    const flat = this.flatRegion(face);
+    const lines = new Set<string>();
+    for (const f of flat) {
+      for (let k = 0; k < 3; k++) {
+        const g = book.neighbour[f * 3 + k] as number;
+        if (g >= 0 && !flat.has(g) && !book.edgeBlocked(f, k)) lines.add(this.edgeLine(f, k));
       }
+    }
+    let best: { faces: Set<number>; hinge: string } | null = null;
+    for (const hinge of lines) {
+      const faces = this.turningOn(face, hinge, under);
+      if (faces.size === book.faces.length || this.heldDown(faces, under)) continue;
+      if (!best || faces.size < best.faces.size) best = { faces, hinge };
+    }
+    return best;
+  }
+
+  /** Works a crease's line key out into a joint, shut. */
+  private makeJoint(faces: ReadonlySet<number>, hinge: string, under: boolean): Joint {
+    const { book } = this;
+    const c = Number(hinge.slice(1));
+    const root = Math.SQRT1_2;
+    const line = {
+      x: { point: [c, 0], along: [0, 1] },
+      z: { point: [0, c], along: [1, 0] },
+      d: { point: [c, 0], along: [root, root] },
+      s: { point: [c, 0], along: [root, -root] },
+    }[hinge[0] as 'x' | 'z' | 'd' | 's'];
+    const [ax, az] = line.along as [number, number];
+    const point: [number, number] = [this.toMetres(line.point[0] as number), this.toMetres(line.point[1] as number)];
+
+    // Across points to the side the paper lies on when shut.
+    let lean = 0;
+    for (const f of faces) {
+      for (let k = 0; k < 3; k++) {
+        lean += (this.toMetres(book.at[f * 6 + k * 2] as number) - point[0]) * az - (this.toMetres(book.at[f * 6 + k * 2 + 1] as number) - point[1]) * ax;
+      }
+    }
+    const sign = lean < 0 ? -1 : 1;
+    return { faces, hinge, point, along: [ax, az], across: [az * sign, -ax * sign], side: under ? -1 : 1, angle: 0, partner: -1, mirrored: true };
+  }
+
+  /** Every outermost flap there is, once each. */
+  private findJoints(): Joint[] {
+    const { book } = this;
+    const taken = new Set<number>();
+    const tried = new Set<number>();
+    const joints: Joint[] = [];
+    for (const under of [false, true]) {
+      tried.clear();
+      for (const stack of book.stacks.values()) {
+        const face = (under ? stack[0] : stack[stack.length - 1]) as number;
+        if (taken.has(face) || tried.has(face)) continue;
+        for (const f of this.flatRegion(face)) tried.add(f);
+        const found = this.jointAt(face, under);
+        if (!found || [...found.faces].some((f) => taken.has(f))) continue;
+        for (const f of found.faces) taken.add(f);
+        joints.push(this.makeJoint(found.faces, found.hinge, under));
+      }
+    }
+    joints.forEach((joint, i) => {
+      joint.partner = joints.findIndex((other, j) => j !== i && other.hinge === joint.hinge && other.side !== joint.side);
+    });
+    return joints;
+  }
+
+  /** The way the paper lies right now, flattened onto the table. */
+  private lyingStance(): Stance {
+    const frame = this.frameOf(this.lifted);
+    const origin = new Float64Array(3), ax = new Float64Array(3), az = new Float64Array(3);
+    frame(0, 0, origin);
+    frame(1, 0, ax);
+    frame(0, 1, az);
+    const flat = (to: Float64Array): [number, number, number] => {
+      const dx = (to[0] as number) - (origin[0] as number), dz = (to[2] as number) - (origin[2] as number);
+      const length = Math.hypot(dx, dz) || 1;
+      return [dx / length, 0, dz / length];
+    };
+    return { origin: [origin[0] as number, 0, origin[2] as number], x: flat(ax), up: [0, 1, 0], z: flat(az), upright: false };
+  }
+
+  /**
+   * Marks the paper complete. It becomes stiff plates turning on its outermost
+   * creases, and stands on its keel if any can turn. The Book does not change.
+   */
+  complete(): readonly Joint[] {
+    const lying = this.lyingStance();
+    this.flaps = [];
+    const joints = this.findJoints();
+    // Pairs go first: a plane's wings are what say which way up it stands.
+    const lead = joints.find((joint) => joint.partner >= 0) ?? joints[0];
+    this.finished = { joints, lying, stance: lead ? standOn(lying, lead) : lying };
+    this.flaps = joints.map((joint) => joint.faces);
+    this.rebuild((mesh) => {
+      const out = new Float64Array(mesh.vertexCount * 3);
+      poseCraft(mesh, joints, joints.map(() => 0), (this.finished as { stance: Stance }).stance, this.definition.thickness, out);
       return out;
     });
-    return true;
+    this.soft.harden(true);
+    return joints;
+  }
+
+  /** Takes a craft back to loose paper, to fold further. Its joints are dropped. */
+  reopen(): void {
+    if (!this.finished) return;
+    const { lying } = this.finished;
+    this.finished = null;
+    this.flaps = [];
+    this.rebuild((mesh) => {
+      const out = new Float64Array(mesh.vertexCount * 3);
+      poseCraft(mesh, [], [], lying, this.definition.thickness, out);
+      return out;
+    });
+  }
+
+  get completed(): boolean {
+    return this.finished !== null;
+  }
+
+  /** The joints of a finished craft, in the order its flaps are numbered. */
+  get joints(): readonly Joint[] {
+    return this.finished?.joints ?? [];
+  }
+
+  /** Sets how far a joint is open, and its partner too while they are mirrored. */
+  setAngle(joint: number, degrees: number): void {
+    const { joints } = this;
+    const target = joints[joint];
+    if (!target) return;
+    target.angle = Math.max(0, Math.min(180, degrees));
+    const partner = joints[target.partner];
+    if (partner && target.mirrored) partner.angle = target.angle;
+  }
+
+  /** Lets a pair move apart or together. Mirroring again brings the partner to this angle. */
+  setMirrored(joint: number, mirrored: boolean): void {
+    const { joints } = this;
+    const target = joints[joint];
+    if (!target) return;
+    target.mirrored = mirrored;
+    const partner = joints[target.partner];
+    if (partner) partner.mirrored = mirrored;
+    this.setAngle(joint, target.angle);
+  }
+
+  /** Lays the paper out at a set of angles, which may be mid-way to the joints' own. */
+  pose(angles: readonly number[] = this.joints.map((joint) => joint.angle)): void {
+    if (!this.finished) return;
+    poseCraft(this.soft.mesh, this.finished.joints, angles, this.finished.stance, this.definition.thickness, this.soft.x);
+  }
+
+  /** Where a flat point of a joint would be in the world at an angle, for aiming a drag. */
+  jointWorld(joint: number, fx: number, fz: number, degrees: number, out: Float64Array): void {
+    if (!this.finished) return;
+    const local = new Float64Array(3);
+    jointPoint(this.finished.joints[joint] as Joint, fx, fz, degrees, local);
+    toWorld(this.finished.stance, local, out);
+  }
+
+  /** The joint outermost over a point of the paper, in metres from its first corner. */
+  jointNear(x: number, z: number, under = false): number {
+    const scale = (this.book.cells * UNITS_PER_CELL) / this.definition.size;
+    const face = this.outerFaceAt(x * scale, z * scale, under);
+    return this.joints.findIndex((joint) => joint.faces.has(face));
   }
 
   /** The outermost face over a lattice point, on the top of the stack or the underside. */
@@ -529,18 +612,16 @@ export class SheetPiece {
   /** Faces currently lifted off their stack. */
   get lifted(): ReadonlySet<number> {
     const all = new Set<number>();
-    for (const flap of this.flaps) for (const f of flap.faces) all.add(f);
+    for (const flap of this.flaps) for (const f of flap) all.add(f);
     return all;
   }
 
-  /** Lets any flap not fixed fall back into the stack. */
+  /** Lets lifted paper fall back into the stack. */
   settle(): void {
-    const falling = new Set<number>();
-    for (const flap of this.flaps) if (!flap.fixed) for (const f of flap.faces) falling.add(f);
-    if (falling.size === 0) return;
+    const flap = this.lifted;
+    if (flap.size === 0) return;
     const before = this.corners();
-    const flap = falling;
-    this.flaps = this.flaps.filter((f) => f.fixed);
+    this.flaps = [];
     this.previousCorners = before;
     this.lastSwing = null;
     this.rebuild((mesh) => {

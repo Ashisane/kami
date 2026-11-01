@@ -33,6 +33,26 @@ function readoutPanel(lab: FoldLab, body: HTMLElement): void {
   );
 }
 
+/** What a finished craft can do: one row for each joint, or for each mirrored pair. */
+function craftPanel(lab: FoldLab, body: HTMLElement): void {
+  const { completed, joints } = lab.readout();
+  if (!completed) {
+    replace(body, h('p.panel-note', {}, 'When the folding is done, mark it complete. Its outermost flaps become hinges, and you drag each one to the angle it should stay at.'));
+    return;
+  }
+  if (joints.length === 0) {
+    replace(body, h('p.panel-note', {}, 'Nothing here can turn: no outer flap is free.'));
+    return;
+  }
+  const rows = joints.flatMap((joint, i) => {
+    if (joint.mirrored && joint.partner >= 0 && joint.partner < i) return [];
+    const name = joint.partner < 0 ? `Flap ${i + 1}` : joint.mirrored ? 'Pair' : `Side ${i + 1}`;
+    const mirror = joint.partner < 0 ? [] : [button(joint.mirrored ? 'Mirrored' : 'Separate', () => lab.setMirrored(i, !joint.mirrored), { title: 'Copy the angle across the crease' })];
+    return [h('li', {}, h('strong', {}, name), h('span', {}, `${joint.angle}°`), ...mirror)];
+  });
+  replace(body, h('ul.rows.lab-hints', {}, rows));
+}
+
 /** The open recipe, as a list you can step through. */
 function recipePanel(lab: FoldLab, body: HTMLElement): void {
   const open = lab.readout().recipe;
@@ -41,6 +61,7 @@ function recipePanel(lab: FoldLab, body: HTMLElement): void {
     return;
   }
   const { recipe, next } = open;
+  const { completed } = lab.readout();
   const finished = next >= recipe.steps.length;
   replace(
     body,
@@ -50,9 +71,7 @@ function recipePanel(lab: FoldLab, body: HTMLElement): void {
       {},
       recipe.steps.map((step, i) => h(`li${i < next ? '.done' : i === next ? '.current' : ''}`, {}, step.label)),
     ),
-    finished
-      ? h('p.panel-note', {}, recipe.finish)
-      : h('div.button-row', {}, button('Next fold', () => lab.nextStep(), { primary: true, title: 'N' }), button('Play all', () => lab.playAll())),
+    finished ? h('p.panel-note', {}, recipe.finish) : completed ? h('div') : h('div.button-row', {}, button('Next fold', () => lab.nextStep(), { primary: true, title: 'N' }), button('Play all', () => lab.playAll())),
   );
 }
 
@@ -62,13 +81,13 @@ export function foldPanel({ stage }: LibraryContext): HTMLElement {
 
   const body = h('div');
   const steps = h('div.recipe');
-  const harden = h('button.btn', { type: 'button', onclick: () => lab.setHardened(!lab.readout().hardened) }, 'Harden');
+  const craft = h('div');
+  const finish = h('button.btn', { type: 'button', title: 'Enter', onclick: () => (lab.readout().completed ? lab.backToFolding() : lab.complete()) }, 'Complete');
   const refresh = () => {
     readoutPanel(lab, body);
     recipePanel(lab, steps);
-    const { hardened } = lab.readout();
-    harden.textContent = hardened ? 'Soften again' : 'Harden';
-    harden.classList.toggle('btn-primary', hardened);
+    craftPanel(lab, craft);
+    finish.textContent = lab.readout().completed ? 'Back to folding' : 'Complete';
   };
   refresh();
   const unsubscribe = lab.subscribe(() => {
@@ -95,7 +114,6 @@ export function foldPanel({ stage }: LibraryContext): HTMLElement {
         h('li', {}, h('strong', {}, 'Wheel'), h('span', {}, 'raise or lower while dragging')),
         h('li', {}, h('strong', {}, 'Shift'), h('span', {}, 'grip every layer at that point')),
         h('li', {}, h('strong', {}, 'Ctrl'), h('span', {}, 'reach the underside, for the flap below')),
-        h('li', {}, h('strong', {}, 'B'), h('span', {}, 'bend a lifted flap: it stays at that angle')),
       ),
     ),
     section(
@@ -105,8 +123,8 @@ export function foldPanel({ stage }: LibraryContext): HTMLElement {
     ),
     section(
       'Finish',
-      h('div.button-row', {}, button('Hold it up', () => lab.holdUp(), { title: 'U' }), harden),
-      h('p.panel-note', {}, 'Freezes the shape the paper holds right now into one solid piece. Hardened paper no longer folds.'),
+      h('div.button-row', {}, finish),
+      craft,
     ),
     section(
       'Bench',

@@ -26,8 +26,10 @@ export interface CaptureRequest {
   hold?: [number, number, number];
   /** How many recipe steps to run. Defaults to all of them. */
   steps?: number;
-  /** Hardens the paper after everything else. */
-  harden?: boolean;
+  /** Marks the paper complete, after everything else. */
+  complete?: boolean;
+  /** Sets the first joint's angle, in degrees. */
+  angle?: number;
   /** Simulation steps to run before the shot. */
   settle?: number;
   clip?: string;
@@ -114,7 +116,8 @@ export function installDebugApi({ stage, store }: LibraryContext, selectionLoade
         if (failures.length) throw new Error(`Recipe ${request.recipe} failed: ${failures.join(', ')}`);
         if (request.hold) lab.holdAt(...request.hold);
         if (request.settle) lab.settle(request.settle);
-        if (request.harden) lab.setHardened(true);
+        if (request.complete && !lab.readout().completed) lab.complete();
+        if (request.angle !== undefined) lab.setAngle(0, request.angle);
         lab.update(0);
       }
       if (request.tab) store.set({ tab: request.tab });

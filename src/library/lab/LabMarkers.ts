@@ -46,6 +46,39 @@ export class PinMarker {
   }
 }
 
+/** The angle being set, beside the hand. It pops on every snap. */
+export class AngleTag {
+  private readonly element = document.createElement('div');
+  private readonly pop = new Spring(1, 6, 0.4);
+
+  constructor(host: HTMLElement) {
+    this.element.className = 'angle-tag';
+    this.element.hidden = true;
+    host.append(this.element);
+  }
+
+  show(x: number, y: number, degrees: number): void {
+    const text = `${degrees}°`;
+    if (this.element.textContent !== text) this.pop.kick(5);
+    this.element.textContent = text;
+    this.element.hidden = false;
+    this.element.style.left = `${x}px`;
+    this.element.style.top = `${y}px`;
+  }
+
+  hide(): void {
+    this.element.hidden = true;
+  }
+
+  update(dt: number): void {
+    if (!this.element.hidden) this.element.style.scale = String(Math.max(0.6, this.pop.update(dt)));
+  }
+
+  dispose(): void {
+    this.element.remove();
+  }
+}
+
 const HINT_FILL = 0.22;
 const HINT_EDGE = 0.95;
 

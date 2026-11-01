@@ -1,5 +1,6 @@
 import { Box3, Group, Plane, Raycaster, Vector2, Vector3 } from 'three';
 import type { PerspectiveCamera, Scene } from 'three';
+import { Spring } from '@/core/anim/spring';
 import type { SheetDefinition } from '@/core/asset/sheetTypes';
 import { guessFold, lineAcrossSheet } from '@/core/fold/foldGuide';
 import type { FoldGuess } from '@/core/fold/foldGuide';
@@ -7,8 +8,9 @@ import { FoldBook } from '@/core/fold/FoldBook';
 import type { FoldFailure, FoldPlan, Landing } from '@/core/fold/FoldBook';
 import { lineNormal, sideOf, UNITS_PER_CELL } from '@/core/fold/lattice';
 import type { LineKind, MirrorLine } from '@/core/fold/lattice';
+import type { Joint } from '@/core/fold/craft';
 import { foldRequest, RECIPES, toMirrorLine } from '@/core/fold/recipes';
-import type { FoldStep, Recipe, RecipeStep, SpreadStep, TrimStep } from '@/core/fold/recipes';
+import type { CompleteStep, FoldStep, Recipe, RecipeStep, TrimStep } from '@/core/fold/recipes';
 import type { ReshapeFailure } from '@/core/fold/reshape';
 import { SheetPiece } from '@/core/fold/SheetPiece';
 import { countCrossings } from '@/core/fold/soft/crossings';
@@ -18,7 +20,7 @@ import type { Shake } from '@/core/fx/Shake';
 import { SheetView } from '@/core/render/SheetView';
 import { SwingFlap } from '@/core/render/SwingFlap';
 import { FixedStep } from '@/core/sim/FixedStep';
-import { FlapHint, FoldGhost, PIN_COLOURS, PinMarker } from './LabMarkers';
+import { AngleTag, FlapHint, FoldGhost, PIN_COLOURS, PinMarker } from './LabMarkers';
 
 const MAX_PINS = 3;
 /** How close the held point must be to its landing for a drop to crease. */
@@ -31,8 +33,10 @@ const SETTLE_STEPS = 30;
 /** Pointer travel, in pixels, that turns a click into a drag. */
 const DRAG_START = 6;
 const DRAG_PLANE_HEIGHT = 0.05;
-/** How high two hands lift a plane off the bench, in metres. */
-const HOLD_UP_HEIGHT = 3.2;
+/** Degrees a joint snaps to. Shift turns it freely. */
+const ANGLE_SNAP = 15;
+/** The shortest lever a drag is measured on, in metres, so grabbing by the hinge still works. */
+const SHORTEST_LEVER = 1;
 
 export type LabTool = 'fold' | 'cut';
 
@@ -41,6 +45,8 @@ interface Bench {
   piece: SheetPiece;
   view: SheetView;
   flap: SwingFlap;
+  /** The angle each joint is showing, which springs towards the one that was set. */
+  shown: Spring[];
 }
 
 /** A hand on the paper. */
@@ -91,7 +97,11 @@ export interface LabReadout {
   stretch: number;
   message: string;
   log: readonly RecipeStep[];
-  hardened: boolean;
+  completed: boolean;
+  /** The joints of a finished craft. */
+  joints: { faces: number; angle: number; partner: number; mirrored: boolean }[];
+  /** The joint being turned right now, or -1. */
+  turning: number;
   cellMetres: number;
   floppiness: number;
   /** How far the paper rises off the ground, in metres. */
@@ -102,8 +112,6 @@ export interface LabReadout {
   hoverFaces: number;
   /** Faces lifted off their stack right now. */
   liftedFaces: number;
-  /** Flaps fixed open. */
-  fixedFlaps: number;
   /** The pin that would fold if dropped, and whether it would succeed. */
   held: { x: number; y: number; z: number; ready: boolean } | null;
   recipe: { recipe: Recipe; next: number } | null;
@@ -128,6 +136,7 @@ export class FoldLab {
   private readonly clock = new FixedStep();
   private readonly ghost: FoldGhost;
   private readonly hint: FlapHint;
+  private readonly tag: AngleTag;
   /** The flap lit up under the pointer. */
   private hover: { bench: Bench; face: number; size: number; revision: number } | null = null;
   private readonly raycaster = new Raycaster();
@@ -135,7 +144,9 @@ export class FoldLab {
   private readonly dragPlane = new Plane(new Vector3(0, 1, 0), -DRAG_PLANE_HEIGHT);
   private readonly history: Snapshot[] = [];
   private log: RecipeStep[] = [];
-  private hardened = false;
+  private completed = false;
+  /** A hand turning a joint of a finished craft. */
+  private posing: { bench: Bench; joint: number; flat: { x: number; z: number }; raw: number; x: number; y: number } | null = null;
   /** True when the sheet starts turned over, for a recipe that wants its printed face outside. */
   private faceDown = false;
   private simulationMs = 0;
@@ -160,6 +171,7 @@ export class FoldLab {
     scene.add(this.group);
     this.ghost = new FoldGhost(overlay);
     this.hint = new FlapHint(overlay);
+    this.tag = new AngleTag(canvas.parentElement as HTMLElement);
     this.addBench(new SheetPiece(definition));
     canvas.addEventListener('pointerdown', this.onDown);
     window.addEventListener('pointermove', this.onMove);
@@ -180,7 +192,7 @@ export class FoldLab {
   private addBench(piece: SheetPiece): Bench {
     const view = new SheetView(piece);
     this.group.add(view.group);
-    const bench = { piece, view, flap: new SwingFlap(piece, this.group) };
+    const bench: Bench = { piece, view, flap: new SwingFlap(piece, this.group), shown: [] };
     this.benches.push(bench);
     return bench;
   }
@@ -204,6 +216,7 @@ export class FoldLab {
     this.clearBenches();
     this.ghost.group.removeFromParent();
     this.hint.dispose();
+    this.tag.dispose();
     this.group.removeFromParent();
     this.canvas.removeEventListener('pointerdown', this.onDown);
     window.removeEventListener('pointermove', this.onMove);
@@ -280,6 +293,10 @@ export class FoldLab {
     if (event.button !== 0 || this.flapsBusy()) return;
     this.ray(event);
     this.fadeHover();
+    if (this.completed) {
+      this.startTurning(event);
+      return;
+    }
     if (this.tool === 'cut') {
       const hit = this.pick();
       if (!hit) return;
@@ -309,6 +326,10 @@ export class FoldLab {
   }
 
   private readonly onMove = (event: PointerEvent): void => {
+    if (this.posing) {
+      this.turnJoint(event);
+      return;
+    }
     if (this.tool === 'cut' && this.cutFrom) {
       this.ray(event);
       const point = this.raycaster.ray.intersectPlane(this.dragPlane, new Vector3());
@@ -338,10 +359,7 @@ export class FoldLab {
   /** A click only pins the stack. Actually pulling is what lifts a flap away from it. */
   private startCarrying(grip: Grip): void {
     const { piece } = grip.bench;
-    const lifts = !grip.carried && grip.seeds.length === 1 && !this.hardened && !piece.pulling;
-    if (lifts && piece.unfix(grip.face)) {
-      grip.peeled = true;
-    } else if (lifts && piece.book.depth(grip.face) > 1 && piece.peel(grip.face, !grip.fromAbove)) {
+    if (!grip.carried && grip.seeds.length === 1 && !piece.pulling && piece.book.depth(grip.face) > 1 && piece.peel(grip.face, !grip.fromAbove)) {
       grip.peeled = true;
       this.regrip(grip.bench);
       for (const f of piece.lifted) (grip.near as Set<number>).add(f);
@@ -370,6 +388,10 @@ export class FoldLab {
   };
 
   private readonly onUp = (): void => {
+    if (this.posing) {
+      this.stopTurning();
+      return;
+    }
     if (this.tool === 'cut' && this.cutFrom) {
       this.finishCut();
       return;
@@ -393,11 +415,15 @@ export class FoldLab {
   // ---- Showing what the pointer would take hold of ----
 
   private updateHover(event: PointerEvent): void {
-    if (event.buttons !== 0 || event.target !== this.canvas || this.tool !== 'fold' || this.hardened || this.flapsBusy()) {
+    if (event.buttons !== 0 || event.target !== this.canvas || this.flapsBusy() || (this.tool !== 'fold' && !this.completed)) {
       this.fadeHover();
       return;
     }
     this.ray(event);
+    if (this.completed) {
+      this.hoverJoint();
+      return;
+    }
     const hit = this.markerUnderPointer() ? null : this.pick(event.ctrlKey);
     const fromAbove = (hit?.fromAbove ?? true) && !event.ctrlKey;
     const face = hit && !hit.bench.piece.pulling ? this.faceOn(hit.bench, hit.tri, fromAbove) : -1;
@@ -423,6 +449,26 @@ export class FoldLab {
     this.canvas.style.cursor = 'grab';
   }
 
+  /** On a finished craft, only what turns lights up: a joint, and the partner that mirrors it. */
+  private hoverJoint(): void {
+    const hit = this.pick();
+    const joint = hit ? (hit.bench.piece.soft.mesh.triFlap[hit.tri] as number) : -1;
+    if (!hit || joint < 0) {
+      this.fadeHover();
+      return;
+    }
+    if (this.hover?.bench === hit.bench && this.hover.face === joint) return;
+    const { piece } = hit.bench;
+    const { joints } = piece;
+    const target = joints[joint];
+    if (!target) return;
+    const partner = target.mirrored ? joints[target.partner] : undefined;
+    const faces = new Set([...target.faces, ...(partner?.faces ?? [])]);
+    this.hover = { bench: hit.bench, face: joint, size: faces.size, revision: piece.revision };
+    this.hint.show(piece.soft.mesh, faces);
+    this.canvas.style.cursor = 'grab';
+  }
+
   private fadeHover(): void {
     if (!this.hover) return;
     this.hover = null;
@@ -434,6 +480,126 @@ export class FoldLab {
     this.hover = null;
     this.hint.clear();
     this.canvas.style.cursor = '';
+  }
+
+  // ---- Turning the joints of a finished craft ----
+
+  private startTurning(event: PointerEvent): void {
+    const hit = this.pick();
+    const joint = hit ? (hit.bench.piece.soft.mesh.triFlap[hit.tri] as number) : -1;
+    if (!hit || joint < 0) return;
+    const grabbed = this.flatPoint(hit.bench, hit.tri, hit.b0, hit.b1, hit.b2);
+    const { angle: raw, point, across } = hit.bench.piece.joints[joint] as Joint;
+    const lever = (grabbed.x - point[0]) * across[0] + (grabbed.z - point[1]) * across[1];
+    const extra = Math.max(0, SHORTEST_LEVER - lever);
+    const flat = { x: grabbed.x + across[0] * extra, z: grabbed.z + across[1] * extra };
+    this.posing = { bench: hit.bench, joint, flat, raw, x: event.clientX, y: event.clientY };
+    this.canvas.style.cursor = 'grabbing';
+    this.setOrbit(false);
+    event.stopPropagation();
+  }
+
+  /** Where a joint's grabbed point would be on screen at an angle. */
+  private screenAt(degrees: number): Vector2 {
+    const { bench, joint, flat } = this.posing as NonNullable<FoldLab['posing']>;
+    const out = new Float64Array(3);
+    bench.piece.jointWorld(joint, flat.x, flat.z, degrees, out);
+    const point = new Vector3().fromArray(out).project(this.camera);
+    const rect = this.canvas.getBoundingClientRect();
+    return new Vector2(((point.x + 1) / 2) * rect.width, ((1 - point.y) / 2) * rect.height);
+  }
+
+  /** The paper follows the hand: whatever way the point would move on screen is the way to pull. */
+  private turnJoint(event: PointerEvent): void {
+    const posing = this.posing as NonNullable<FoldLab['posing']>;
+    const { bench, joint } = posing;
+    const { piece } = bench;
+    const dx = event.clientX - posing.x, dy = event.clientY - posing.y;
+    posing.x = event.clientX;
+    posing.y = event.clientY;
+    const step = posing.raw < 170 ? 5 : -5;
+    const tangent = this.screenAt(posing.raw + step).sub(this.screenAt(posing.raw)).divideScalar(step);
+    const reach = tangent.lengthSq();
+    if (reach > 1e-3) posing.raw = Math.max(0, Math.min(180, posing.raw + (dx * tangent.x + dy * tangent.y) / reach));
+
+    const angle = event.shiftKey ? Math.round(posing.raw) : Math.round(posing.raw / ANGLE_SNAP) * ANGLE_SNAP;
+    const host = (this.canvas.parentElement as HTMLElement).getBoundingClientRect();
+    this.tag.show(event.clientX - host.left, event.clientY - host.top, angle);
+    if (angle === piece.joints[joint]?.angle) return;
+    piece.setAngle(joint, angle);
+    this.syncShown(bench);
+    this.shake.add(0.03);
+    this.notify();
+  }
+
+  private stopTurning(): void {
+    const posing = this.posing as NonNullable<FoldLab['posing']>;
+    const angle = posing.bench.piece.joints[posing.joint]?.angle ?? 0;
+    this.posing = null;
+    this.tag.hide();
+    this.canvas.style.cursor = '';
+    this.setOrbit(true);
+    this.setMessage(`Set at ${angle} degrees.`);
+  }
+
+  private syncShown(bench: Bench): void {
+    bench.piece.joints.forEach((joint, i) => {
+      const spring = bench.shown[i];
+      if (spring) spring.target = joint.angle;
+    });
+  }
+
+  /** Marks the paper complete: its outermost flaps become hinges, and folding ends. */
+  complete(): void {
+    if (this.completed || this.flapsBusy()) return;
+    this.letGoAll();
+    this.clearHover();
+    this.completed = true;
+    let count = 0;
+    for (const bench of this.benches) {
+      const before = bench.piece.corners();
+      count += bench.piece.complete().length;
+      bench.shown = bench.piece.joints.map(() => new Spring(0, 5, 0.5));
+      bench.flap.start(new Set(bench.piece.book.faces), before, null);
+    }
+    this.setMessage(count > 0 ? 'Complete. Drag a flap to set its angle.' : 'Complete. Nothing here can turn: no outer flap is free.');
+  }
+
+  /** Back to loose paper, to fold further. The angles are dropped. */
+  backToFolding(): void {
+    if (!this.completed || this.flapsBusy()) return;
+    this.clearHover();
+    this.completed = false;
+    for (const bench of this.benches) {
+      const before = bench.piece.corners();
+      bench.piece.reopen();
+      bench.shown = [];
+      bench.flap.start(new Set(bench.piece.book.faces), before, null);
+    }
+    this.setMessage('Back to folding.');
+  }
+
+  /** Lets a pair of joints move apart, or brings them back together. */
+  setMirrored(joint: number, mirrored: boolean): void {
+    const bench = this.benches[0];
+    if (!bench) return;
+    bench.piece.setMirrored(joint, mirrored);
+    this.syncShown(bench);
+    this.notify();
+  }
+
+  /** Sets an angle directly, for screenshots. */
+  setAngle(joint: number, degrees: number): void {
+    const bench = this.benches[0];
+    if (!bench) return;
+    bench.piece.setAngle(joint, degrees);
+    bench.piece.joints.forEach((j, i) => bench.shown[i]?.snap(j.angle));
+    bench.piece.pose();
+  }
+
+  private showJoints(bench: Bench, dt: number): void {
+    if (bench.shown.every((spring) => spring.settled)) return;
+    bench.piece.pose(bench.shown.map((spring) => Math.max(0, Math.min(180, spring.update(dt)))));
   }
 
   // ---- Holding paper ----
@@ -560,7 +726,7 @@ export class FoldLab {
    * and holding never fold anything, so a fold always means someone chose it.
    */
   drop(grip: Grip): void {
-    const assessment = grip.carried && !this.hardened ? this.assess(grip) : null;
+    const assessment = grip.carried ? this.assess(grip) : null;
     if (assessment?.reachable) {
       this.commit(grip, assessment);
       return;
@@ -568,25 +734,6 @@ export class FoldLab {
     const failure = assessment?.plan.failure;
     if (failure === 'jammed' || failure === 'layers-cross') this.reportFailure(failure);
     this.letGo(grip);
-  }
-
-  /** Bends a lifted flap for good at the angle it is held, and lets the hand go. */
-  fixFlap(): void {
-    const grips = this.grips.filter((grip) => grip.peeled);
-    const first = grips[0];
-    if (!first) {
-      this.setMessage('Pull a flap open first, then fix it there.');
-      return;
-    }
-    first.bench.piece.fixFlaps();
-    for (const grip of grips) {
-      grip.peeled = false;
-      this.dropGrip(grip);
-    }
-    const { x, y, z } = first.pin;
-    this.scraps.burst(new Vector3(x, y, z), 10, [first.bench.piece.definition.top, first.bench.piece.definition.bottom], 0.5, 0.6);
-    this.shake.add(0.1);
-    this.setMessage('Fixed open. It stays where you left it.');
   }
 
   /** Drops the hand that last pulled paper. */
@@ -639,7 +786,7 @@ export class FoldLab {
 
   private updateGuide(dt: number): void {
     const grip = this.active;
-    if (!grip || this.hardened) {
+    if (!grip) {
       this.showNextRecipeLine(dt);
       return;
     }
@@ -750,13 +897,17 @@ export class FoldLab {
 
   /** Lab only: the game itself has no undo. */
   stepBack(): void {
+    if (this.completed && !this.recipe) {
+      this.backToFolding();
+      return;
+    }
     const snapshot = this.history.pop();
     if (!snapshot) return;
     this.clearBenches();
     this.log = snapshot.log;
     if (this.recipe) this.recipe.next = snapshot.recipeNext;
     this.addBench(new SheetPiece(this.dressed(), snapshot.book));
-    this.hardened = false;
+    this.completed = false;
     this.setMessage('Stepped back.');
   }
 
@@ -774,8 +925,7 @@ export class FoldLab {
     this.log = [];
     this.recipe = null;
     this.autoplay = false;
-    this.hardened = false;
-    for (const bench of this.benches) bench.piece.harden(false);
+    this.completed = false;
     this.addBench(new SheetPiece(this.dressed()));
     this.setMessage(`A fresh sheet, ${definition.size / definition.cells} m between fold lines.`);
   }
@@ -815,7 +965,7 @@ export class FoldLab {
   nextStep(): void {
     const step = this.recipe?.recipe.steps[this.recipe.next];
     const bench = this.benches[0];
-    if (!this.recipe || !step || !bench || this.flapsBusy()) return;
+    if (!this.recipe || !step || !bench || this.flapsBusy() || this.completed) return;
     this.remember();
     this.recipe.next++;
 
@@ -833,17 +983,10 @@ export class FoldLab {
       }
       for (const grip of this.grips.filter((g) => g.bench === bench)) this.dropGrip(grip);
       bench.flap.start(new Set(bench.piece.book.faces), before, null);
-    } else if (step.action === 'spread') {
-      const before = bench.piece.corners();
-      for (const grip of this.grips.filter((g) => g.bench === bench)) this.dropGrip(grip);
-      if (!this.spread(bench, step)) {
-        this.history.pop();
-        this.recipe.next--;
-        this.autoplay = false;
-        this.setMessage(`"${step.label}" could not be done.`);
-        return;
-      }
-      bench.flap.start(new Set(bench.piece.book.faces), before, null);
+    } else if (step.action === 'complete') {
+      this.complete();
+      this.openJoint(bench, step);
+      this.syncShown(bench);
     } else {
       const { piece } = bench;
       const request = foldRequest(piece.book, piece.definition.size, step);
@@ -865,46 +1008,11 @@ export class FoldLab {
     this.autoplay = true;
   }
 
-  /** Opens the wings, with two hands on the body holding it up. */
-  private spread(bench: Bench, step: SpreadStep): boolean {
-    if (!bench.piece.spread(step)) return false;
-    this.takeBothEnds(bench);
-    return true;
-  }
-
-  /** Two hands on the paper that is not lifted, as far apart along it as they can get. */
-  private takeBothEnds(bench: Bench): Grip[] {
+  private openJoint(bench: Bench, step: CompleteStep): void {
     const { piece } = bench;
-    const { mesh } = piece.soft;
-    const { lifted } = piece;
-    let nose = -1, tail = -1, low = Infinity, high = -Infinity;
-    for (const f of piece.book.faces) {
-      if (lifted.has(f)) continue;
-      const t = mesh.faceTri[f] as number;
-      const z = mesh.flat[(mesh.tris[t * 3] as number) * 2 + 1] as number;
-      if (z < low) {
-        low = z;
-        nose = t;
-      }
-      if (z > high) {
-        high = z;
-        tail = t;
-      }
-    }
-    const hit = (tri: number) => ({ bench, tri, b0: 1 / 3, b1: 1 / 3, b2: 1 / 3, fromAbove: true });
-    return [this.grab(hit(nose), true), this.grab(hit(tail), true)].filter((grip) => grip !== null);
-  }
-
-  /** Lifts the paper off the bench by both ends, so whatever is underneath can be reached. */
-  holdUp(): void {
-    const bench = this.benches[0];
-    if (!bench || this.hardened) return;
-    this.letGoAll();
-    for (const grip of this.takeBothEnds(bench)) {
-      grip.pin.y = HOLD_UP_HEIGHT;
-      grip.target.y = HOLD_UP_HEIGHT;
-    }
-    this.setMessage('Held up. Hold Ctrl and pull the flap underneath.');
+    const joint = piece.jointNear(step.at[0], step.at[1]);
+    if (joint < 0) throw new Error(`${step.label}: nothing turns there`);
+    piece.setAngle(joint, step.angle);
   }
 
   private trim(bench: Bench, step: TrimStep): void {
@@ -935,8 +1043,12 @@ export class FoldLab {
         if (failure) throw new Error(`${step.label}: ${failure}`);
         continue;
       }
-      if (step.action === 'spread') {
-        if (!this.spread(bench, step)) throw new Error(`${step.label}: no wings to open`);
+      if (step.action === 'complete') {
+        this.complete();
+        bench.flap.clear();
+        this.openJoint(bench, step);
+        bench.piece.joints.forEach((joint, i) => bench.shown[i]?.snap(joint.angle));
+        bench.piece.pose();
         continue;
       }
       const { piece } = bench;
@@ -1013,15 +1125,6 @@ export class FoldLab {
     this.setMessage(pieces.length > 1 ? `Cut into ${pieces.length} pieces.` : 'Cut a slit.');
   }
 
-  // ---- Hardening ----
-
-  /** Finishes the paper: its present shape becomes one solid body. */
-  setHardened(hardened: boolean): void {
-    this.hardened = hardened;
-    for (const bench of this.benches) bench.piece.harden(hardened);
-    this.setMessage(hardened ? 'Hardened. It keeps this shape and no longer folds.' : 'Soft again.');
-  }
-
   // ---- Frame ----
 
   update(dt: number): void {
@@ -1043,6 +1146,8 @@ export class FoldLab {
     }
     if (this.tool === 'cut' && this.cutFrom) this.showCutGuide(dt);
     else this.updateGuide(dt);
+    for (const bench of this.benches) this.showJoints(bench, dt);
+    this.tag.update(dt);
     for (const bench of this.benches) bench.view.update(bench.flap.hidden);
     const { hover } = this;
     if (hover && hover.bench.piece.revision !== hover.revision) this.clearHover();
@@ -1118,14 +1223,15 @@ export class FoldLab {
       stretch: first ? first.piece.soft.stretch() : 0,
       message: this.message,
       log: this.log,
-      hardened: this.hardened,
+      completed: this.completed,
+      joints: (first?.piece.joints ?? []).map((joint) => ({ faces: joint.faces.size, angle: joint.angle, partner: joint.partner, mirrored: joint.mirrored })),
+      turning: this.posing?.joint ?? -1,
       cellMetres: this.definition.size / this.definition.cells,
       floppiness: this.definition.floppiness,
       height: this.height(),
       lowest: this.benches.reduce((low, b) => Math.min(low, b.view.lowest), Infinity),
       hoverFaces: this.hover?.size ?? 0,
       liftedFaces: this.benches.reduce((sum, b) => sum + b.piece.lifted.size, 0),
-      fixedFlaps: this.benches.reduce((sum, b) => sum + b.piece.fixedFlaps, 0),
       held: active ? { x: active.pin.heldX, y: active.pin.heldY, z: active.pin.heldZ, ready: assessment?.reachable ?? false } : null,
       recipe: this.recipe,
     };

@@ -33,8 +33,6 @@ export interface SoftMesh {
   hingeLayers: Float64Array;
   /** 1 where a hinge is a made crease, which wants to stay shut. */
   hingeFolded: Uint8Array;
-  /** Which flap a hinge turns, or -1. */
-  hingeFlap: Int32Array;
   /** Which triangle each book face belongs to, by face id; -1 if not in this piece. */
   faceTri: Int32Array;
   /** Which vertex each face corner belongs to: index by face * 3 + corner. */
@@ -185,7 +183,6 @@ export function buildSoftMesh(book: FoldBook, size: number, flaps: readonly Read
   const hingeList: number[] = [];
   const hingeLayerList: number[] = [];
   const hingeFoldedList: number[] = [];
-  const hingeFlapList: number[] = [];
   const opposite = (t: number, a: number, b: number) => {
     for (let k = 0; k < 3; k++) {
       const v = tris[t * 3 + k] as number;
@@ -222,7 +219,6 @@ export function buildSoftMesh(book: FoldBook, size: number, flaps: readonly Read
         hingeList.push(a, b, wingS, wingT);
         hingeLayerList.push(((triLayers[s] as number) + (triLayers[t] as number)) / 2);
         hingeFoldedList.push(folded ? 1 : 0);
-        hingeFlapList.push(Math.max(flapS, flapT));
       }
     }
   }
@@ -260,7 +256,6 @@ export function buildSoftMesh(book: FoldBook, size: number, flaps: readonly Read
     hinges: Int32Array.from(hingeList),
     hingeLayers: Float64Array.from(hingeLayerList),
     hingeFolded: Uint8Array.from(hingeFoldedList),
-    hingeFlap: Int32Array.from(hingeFlapList),
     faceTri,
     cornerVertex,
     cornerHeight,

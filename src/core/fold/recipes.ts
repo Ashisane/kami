@@ -52,24 +52,17 @@ export interface OpenStep {
   ready?: FoldStep[];
 }
 
-/**
- * Opens wings out and stands the paper up on its keel, for the moment a crew holds
- * it up to harden. Shape only: the Book keeps the folds it has.
- */
-export interface SpreadStep {
-  action: 'spread';
+/** Marks the paper complete, then opens the flap at a point. Its partner mirrors it. */
+export interface CompleteStep {
+  action: 'complete';
   label: string;
-  /** The straight crease both wings turn on, in metres as the paper lies. */
-  hinge: { kind: 'x' | 'z'; at: number };
-  /** A point on each wing, in metres as the paper lies, on the top or the underside. */
-  wings: { at: [number, number]; under: boolean }[];
-  /** Degrees each wing opens from its body. 90 is square to it. */
+  /** A point on the flap, in metres as the paper lies. */
+  at: [number, number];
+  /** Degrees it opens from its body. 90 is square to it. */
   angle: number;
-  /** Where the hinge is held, in metres off the ground. */
-  height: number;
 }
 
-export type RecipeStep = FoldStep | TrimStep | OpenStep | SpreadStep;
+export type RecipeStep = FoldStep | TrimStep | OpenStep | CompleteStep;
 
 export interface Recipe {
   id: string;
@@ -167,7 +160,7 @@ export function runRecipe(recipe: Recipe, start: FoldBook, size: number): { book
       if (failed) return { book, failure: `${step.label}: ${failed}` };
       continue;
     }
-    if (step.action === 'spread') continue;
+    if (step.action === 'complete') continue;
     const plan = applyFold(book, size, step);
     if (plan.failure) return { book, failure: `${step.label}: ${plan.failure}` };
   }
@@ -204,14 +197,7 @@ const planeWings = (crease: number): RecipeStep[] => [
   fold('Fold the other wing down', 'x', crease, -1, 'all', { from: { axis: 'x', min: 3 }, landing: { kind: 'under' } }),
 ];
 
-const spreadWings = (crease: number, angle: number, at: [number, number]): SpreadStep => ({
-  action: 'spread',
-  label: 'Open the wings and hold it up',
-  hinge: { kind: 'x', at: crease },
-  wings: [{ at, under: false }, { at, under: true }],
-  angle,
-  height: 2.4,
-});
+const openWings = (angle: number, at: [number, number]): CompleteStep => ({ action: 'complete', label: 'Mark it complete and open the wings', at, angle });
 
 export const RECIPES: readonly Recipe[] = [
   {
@@ -250,21 +236,21 @@ export const RECIPES: readonly Recipe[] = [
     id: 'plane',
     name: 'Nakamura plane',
     source: 'Nakamura Lock, after the Southwest Adopt-A-Pilot sheet',
-    finish: 'Two hands hold it up, wings open. Press Harden to keep it.',
+    finish: 'Complete. Drag a wing to set its angle.',
     faceDown: true,
-    steps: [...planeBody, ...planeWings(2), spreadWings(2, 118, [3, 8])],
+    steps: [...planeBody, ...planeWings(2), openWings(118, [3, 8])],
   },
   {
     id: 'dart',
     name: 'Dart',
     source: 'The Nakamura plane with its tail cut off, so each wing comes to a point',
-    finish: 'Two hands hold it up, wings open. Press Harden to keep it.',
+    finish: 'Complete. Drag a wing to set its angle.',
     faceDown: true,
     steps: [
       ...planeBody,
       { action: 'trim', label: 'Cut the tail off, through every layer', kind: 'z', at: 7, from: 0, to: 6 },
       ...planeWings(2.5),
-      spreadWings(2.5, 118, [3.5, 6.5]),
+      openWings(118, [3.5, 6.5]),
     ],
   },
   {

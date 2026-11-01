@@ -1,7 +1,7 @@
 # The paper system
 
 Up to four 1 m players start with a floppy 10 m sheet and physically fold it.
-What they build, they harden, then use. This is the core of the game.
+What they build, they mark complete, then use. This is the core of the game.
 
 ## Two layers, each doing one job
 
@@ -72,8 +72,8 @@ for floppy paper, where they work very well.
 | Right click the pin, or Esc | Let go, no crease |
 | Shift + drag | Grip every layer at that point |
 | Ctrl | Reach the underside: the flap below |
-| B | Bend a lifted flap: it stays at that angle |
-| U, or Hold it up | Two hands lift the paper by both ends |
+| Enter, or Complete | End the folding: flaps become hinges |
+| Drag a flap, once complete | Set its angle. Shift turns it freely |
 
 ## How paper keeps from going through itself
 
@@ -154,30 +154,29 @@ mat also sits back in depth, or a far camera could not tell paper from it.
   strip of 4 layers sagged almost as far as one sheet (8.6 m against 8.8 m). Squared
   it sags 8.3 m, and cubed it sagged 7.2 m.
 
-## Opening wings
+## Finishing a craft
 
-A pulled flap wants to shut. Pressing B bends its crease for good at the angle it is
-held, as real paper keeps a bend, and the flap stays when every hand lets go. Several
-flaps can be open at once: `buildSoftMesh` takes them as a list, so two wings on one
-crease stay apart instead of welding together.
+Folding is loose and physical. A finished craft is not. Pressing Complete ends the
+folding and turns the paper into stiff plates on hinges (`src/core/fold/craft.ts`):
 
-A plane lies on one wing, so that wing cannot open against the bench. Hold it up
-first, then Ctrl reaches it, straight through any flap already open. The third pin is
-free for that, since two hold the body.
+- **Joints are found, not drawn.** Each outermost free flap becomes a joint, on the
+  crease where turning it moves the least paper. That is what picks a wing's fold over
+  its lock creases, which would carry the whole body. Anything held by another layer,
+  or by two creases, is not a joint and does not light up.
+- **Two flaps on one crease are a pair**, one on each face of the stack. They mirror
+  each other until told not to, so a plane's lower wing never has to be reached.
+- **It stands on its keel.** The first pair's crease runs along the top, with the body
+  hanging below it. The lowest point rests on the table.
+- **An angle is exact.** Dragging turns a plate about its hinge, snapping every 15
+  degrees, or freely with Shift. Nothing is simulated, so a craft is a short list of
+  creases and angles, the same on every machine.
 
-A flap has its own surface normals. Shared across a crease, the normals of two
-opposed wings cancel, and the top and bottom of each wing collapse together there.
+The Book does not change, so Back to folding returns the paper as it was and drops
+the angles. A recipe's last step does the same thing as a hand: `CompleteStep` marks
+it complete and sets an angle.
 
-`SpreadStep` does all this at once, for a recipe: it stands the paper on its keel
-with its wings open and two hands holding it. It is shape only, so the Book is
-unchanged. Folding again shuts every flap, because the Book only knows flat paper.
-
-## Hardening
-
-There is no hinge system for 3D shape. Players hold the paper where they want it
-and press Harden, which freezes the current pose into one solid body. It is a
-finishing step: there is no rigidity control while building, and hardened paper no
-longer folds.
+Only one level of joint exists, so a bent wingtip on a wing is not possible yet. A
+joint stops at shut and flat out, but nothing stops it passing through other paper.
 
 ## Opening a pocket
 
@@ -227,8 +226,6 @@ longer join become separate sheets. A slit stays one piece and stays open.
   paper tucks away. Tucking them first left no workable layer order.
 - **An opening can stall the frame.** The layer search is capped, but it runs on the
   main thread and can take a few seconds.
-- **A plane held up rolls.** Two hands make an axis, so the weight of an open wing turns
-  it, and the wing below can end up edge-on. Orbit the camera to reach it.
 - **Layers pinned on all sides barely lift.** A visible patch held by a crease or a
   cover along every edge has few free points, so it carries its neighbours along. With
   no pin near it, pulling raises the whole nose.
