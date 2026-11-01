@@ -32,7 +32,8 @@ Only what is needed to test the mechanics, each proven in the library first.
 ## Open questions
 
 - **Performance target.** On the development Intel UHD GPU at 1440×900, with
-  one small model on stage: High 20 fps, Balanced 36 fps, Fast 84 fps. Real
-  scenes cost more, so contact shadows need a cheaper approach or an explicit
-  decision that low-end players use Fast.
+  one small model on stage: High 14 to 20 fps, Balanced 24 to 36 fps, Fast 45
+  to 84 fps. The lower figures were measured with a second library open on the
+  same GPU. Real scenes cost more, so contact shadows need a cheaper approach
+  or an explicit decision that low-end players use Fast.
 - **Distribution.** Decide before multiplayer: browser, or a desktop wrapper for Steam.
