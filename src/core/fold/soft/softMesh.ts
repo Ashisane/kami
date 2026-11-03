@@ -14,6 +14,9 @@ import { layerHeights } from '../levels';
  *
  * `flaps` stay out of the merge, each on its own, so a flap can lift away from
  * the stack while staying joined to it along its crease.
+ *
+ * `held` paper is locked: kept still, with whatever lies on it, so nothing moves it.
+ * A loose layer on it lifts off as a flap.
  */
 export interface SoftMesh {
   vertexCount: number;
@@ -26,6 +29,8 @@ export interface SoftMesh {
   triLayers: Int32Array;
   /** Which flap each triangle belongs to, or -1 for the stack. */
   triFlap: Int32Array;
+  /** 1 where a triangle has held paper in it, so it does not move. */
+  triHeld: Uint8Array;
   /** Vertex pairs, two per edge. */
   edges: Int32Array;
   edgeLength: Float64Array;
@@ -40,6 +45,8 @@ export interface SoftMesh {
   faceTri: Int32Array;
   /** Which vertex each face corner belongs to: index by face * 3 + corner. */
   cornerVertex: Int32Array;
+  /** Where each face corner sat on the unfolded sheet, in metres: x z, index by (face * 3 + corner) * 2. */
+  cornerRest: Float64Array;
   /** True height of each face corner in layers: index by face * 3 + corner. */
   cornerHeight: Float32Array;
   /** Height of the paper from its lowest point to its highest, in layers. */
@@ -74,7 +81,15 @@ class Corners {
   }
 }
 
-export function buildSoftMesh(book: FoldBook, size: number, flaps: readonly ReadonlySet<number>[] = [], bends: readonly (MirrorLine | null)[] = []): SoftMesh {
+const NOTHING: ReadonlySet<number> = new Set();
+
+export function buildSoftMesh(
+  book: FoldBook,
+  size: number,
+  flaps: readonly ReadonlySet<number>[] = [],
+  bends: readonly (MirrorLine | null)[] = [],
+  held: ReadonlySet<number> = NOTHING,
+): SoftMesh {
   const corners = new Corners(book.faceCount * 3);
   const { rest, at, neighbour } = book;
   const unit = metresPerUnit(book, size);
@@ -96,12 +111,15 @@ export function buildSoftMesh(book: FoldBook, size: number, flaps: readonly Read
   }
 
   // Layers in one stack weld together, group by group: the stack, then each flap.
+  // A stack with held paper in it is held, loose layers and all, as a hand pressing
+  // down holds whatever lies under it. A loose layer comes away when it is lifted.
   const flapOf = new Int32Array(book.faceCount).fill(-1);
   flaps.forEach((flap, i) => {
     for (const f of flap) flapOf[f] = i;
   });
   const groups: number[][] = [];
   const groupFlap: number[] = [];
+  const groupHeld: boolean[] = [];
   for (const stack of book.stacks.values()) {
     const split = new Map<number, number[]>();
     for (const f of stack) {
@@ -113,6 +131,7 @@ export function buildSoftMesh(book: FoldBook, size: number, flaps: readonly Read
     for (const [flap, group] of split) {
       groups.push(group);
       groupFlap.push(flap);
+      groupHeld.push(flap < 0 && group.some((f) => held.has(f)));
       const first = group[0] as number;
       for (const f of group) {
         for (let k = 0; k < 3; k++) {
@@ -144,6 +163,10 @@ export function buildSoftMesh(book: FoldBook, size: number, flaps: readonly Read
   }
   const vertexCount = ids.size;
   const flat = Float64Array.from(flatList);
+  const cornerRest = new Float64Array(book.faceCount * 6);
+  for (const f of book.faces) {
+    for (let i = 0; i < 6; i++) cornerRest[f * 6 + i] = ((rest[f * 6 + i] as number) - half) * unit;
+  }
 
   const triCount = groups.length;
   const tris = new Int32Array(triCount * 3);
@@ -236,8 +259,8 @@ export function buildSoftMesh(book: FoldBook, size: number, flaps: readonly Read
         const wingS = opposite(s, a, b), wingT = opposite(t, a, b);
         const folded = sameSide(a, b, wingS, wingT);
         const flapS = groupFlap[s] as number, flapT = groupFlap[t] as number;
-        // Layers folded together stay together, and two flaps only meet through the stack.
-        if (folded && (flapS === flapT || (flapS >= 0 && flapT >= 0))) continue;
+        // Two lifted flaps only meet through the stack.
+        if (folded && flapS >= 0 && flapT >= 0) continue;
         hingeList.push(a, b, wingS, wingT);
         hingeLayerList.push(((triLayers[s] as number) + (triLayers[t] as number)) / 2);
         hingeFoldedList.push(folded ? 1 : 0);
@@ -267,6 +290,10 @@ export function buildSoftMesh(book: FoldBook, size: number, flaps: readonly Read
     }
   }
   const inverseMass = mass.map((m) => (m > 0 ? reference / m : 0));
+  // Held paper does not move, and nor do the points loose paper shares with it.
+  groupHeld.forEach((pressed, t) => {
+    if (pressed) for (let k = 0; k < 3; k++) inverseMass[tris[t * 3 + k] as number] = 0;
+  });
 
   return {
     vertexCount,
@@ -275,6 +302,7 @@ export function buildSoftMesh(book: FoldBook, size: number, flaps: readonly Read
     triCount,
     triLayers,
     triFlap: Int32Array.from(groupFlap),
+    triHeld: Uint8Array.from(groupHeld, (pressed) => (pressed ? 1 : 0)),
     edges,
     edgeLength,
     hinges: Int32Array.from(hingeList),
@@ -283,6 +311,7 @@ export function buildSoftMesh(book: FoldBook, size: number, flaps: readonly Read
     hingeLoose: Uint8Array.from(hingeLooseList),
     faceTri,
     cornerVertex,
+    cornerRest,
     cornerHeight,
     heightInLayers,
     vertexDepth,

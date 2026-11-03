@@ -5,7 +5,7 @@ import type { SheetDefinition } from '@/core/asset/sheetTypes';
 import { guessFold, lineAcrossSheet } from '@/core/fold/foldGuide';
 import type { FoldGuess } from '@/core/fold/foldGuide';
 import { FoldBook } from '@/core/fold/FoldBook';
-import type { FoldFailure, FoldPlan, Landing } from '@/core/fold/FoldBook';
+import type { Landing } from '@/core/fold/FoldBook';
 import { lineNormal, UNITS_PER_CELL } from '@/core/fold/lattice';
 import type { LineKind, MirrorLine } from '@/core/fold/lattice';
 import type { Joint } from '@/core/fold/craft';
@@ -15,6 +15,7 @@ import { foldRequest, RECIPES, toMirrorLine } from '@/core/fold/recipes';
 import type { CompleteStep, FoldStep, Recipe, RecipeStep, TrimStep } from '@/core/fold/recipes';
 import type { ReshapeFailure } from '@/core/fold/reshape';
 import { readFlat, SheetPiece } from '@/core/fold/SheetPiece';
+import type { FoldRefusal, PiecePlan } from '@/core/fold/SheetPiece';
 import { countCrossings } from '@/core/fold/soft/crossings';
 import type { Pin } from '@/core/fold/soft/SoftSheet';
 import type { ScrapBurst } from '@/core/fx/ScrapBurst';
@@ -22,7 +23,7 @@ import type { Shake } from '@/core/fx/Shake';
 import { SheetView } from '@/core/render/SheetView';
 import { SwingFlap } from '@/core/render/SwingFlap';
 import { FixedStep } from '@/core/sim/FixedStep';
-import { AngleTag, FlapHint, FoldGhost, PIN_COLOURS, PinMarker } from './LabMarkers';
+import { AngleTag, FlapHint, FoldGhost, HeldMarks, LockBrush, PIN_COLOURS, PinMarker, Tether } from './LabMarkers';
 
 const MAX_PINS = 3;
 /** How close the held point must be to its landing for a drop to crease. */
@@ -39,8 +40,16 @@ const HOLDING_UP = 0.5;
 const ANGLE_SNAP = 15;
 /** The shortest lever a drag is measured on, in metres, so grabbing by the hinge still works. */
 const SHORTEST_LEVER = 1;
+/** Radius of the brush that paints locks, in metres. */
+const BRUSH_RADIUS = 0.9;
+/** Seconds between rebuilds of the cloth while locks are painted: each one rebuilds it. */
+const PAINT_INTERVAL = 0.06;
+/** Metres past its reach at which a hand shows full strain. */
+const FULL_STRAIN = 1.5;
+/** Seconds that paper just freed glows. */
+const FREED_GLOW = 0.45;
 
-export type LabTool = 'fold' | 'cut';
+export type LabTool = 'fold' | 'cut' | 'lock';
 
 /** One sheet of paper on the bench, with its picture. */
 interface Bench {
@@ -49,6 +58,8 @@ interface Bench {
   flap: SwingFlap;
   /** The angle each joint is showing, which springs towards the one that was set. */
   shown: Spring[];
+  /** Paper a fold just locked, marked once the fold lands, and the point its ink spreads from. */
+  pressed: { faces: ReadonlySet<number>; from: { x: number; z: number } } | null;
 }
 
 /** A hand on the paper. */
@@ -81,16 +92,40 @@ interface Grip {
   flap: ReadonlySet<number>;
 }
 
+/** A press of the lock tool on the paper. */
+interface LockStroke {
+  bench: Bench;
+  face: number;
+  /** Where it was pressed, on the flat sheet and in the world. */
+  flat: { x: number; z: number };
+  at: Vector3;
+  /** True if this press locks paper, false if it frees it. */
+  locking: boolean;
+  under: boolean;
+  /** With Shift, every layer under the brush, not only the paper first pressed. */
+  every: boolean;
+  /** The flat paper first pressed. The brush paints only this, so a layer can be locked under another. */
+  panel: ReadonlySet<number>;
+  x: number;
+  y: number;
+  moved: boolean;
+  /** Where the brush last painted, on the flat sheet, and the face there. */
+  last: { x: number; z: number; face: number } | null;
+  /** Faces painted since the cloth was last rebuilt. */
+  pending: Set<number>;
+}
+
 /** What dropping a held point would do. */
 interface Assessment {
   guess: FoldGuess;
-  plan: FoldPlan;
+  plan: PiecePlan;
   landing: Landing;
   reachable: boolean;
 }
 
 interface Snapshot {
   book: FoldBook;
+  held: number[];
   log: RecipeStep[];
   recipeNext: number;
 }
@@ -117,14 +152,20 @@ export interface LabReadout {
   floppiness: number;
   /** How far the paper rises off the ground, in metres. */
   height: number;
+  /** How far paper that no hand has lifted rises off the ground: the layers left lying. */
+  resting: number;
   /** The lowest point of paper actually drawn, in metres. */
   lowest: number;
   /** Faces lit up under the pointer, ready to lift. */
   hoverFaces: number;
   /** Faces lifted off their stack right now. */
   liftedFaces: number;
+  /** Faces locked in place right now. */
+  lockedFaces: number;
+  /** True when a made fold locks down with the paper it lands on. */
+  lockFolds: boolean;
   /** The pin that would fold if dropped, and whether it would succeed. */
-  held: { x: number; y: number; z: number; ready: boolean; from: { x: number; z: number }; to: { x: number; z: number } | null } | null;
+  held: { x: number; y: number; z: number; ready: boolean; from: { x: number; z: number }; to: { x: number; z: number } | null; strain: number } | null;
   recipe: { recipe: Recipe; next: number } | null;
 }
 
@@ -143,12 +184,25 @@ export class FoldLab {
   /** Where the hand is aiming on the flat paper, so a check can see what the guide was given. */
   private aimedAt: { x: number; z: number } | null = null;
   private planKey = '';
-  private cachedPlan: FoldPlan | null = null;
+  private cachedPlan: PiecePlan | null = null;
 
   private readonly clock = new FixedStep();
   private readonly ghost: FoldGhost;
   private readonly hint: FlapHint;
   private readonly tag: AngleTag;
+  private readonly marks = new HeldMarks();
+  private readonly brush: LockBrush;
+  private readonly tether: Tether;
+  private stroke: LockStroke | null = null;
+  private paintClock = 0;
+  /** Where the pointer last was, for keys that act on the paper under it. */
+  private pointerAt: { x: number; y: number } | null = null;
+  /** Paper just freed glows for a moment: on which sheet, and for how much longer. */
+  private freed: { bench: Bench; left: number } | null = null;
+  /** Locked paper in the way of the fold a hand has lined up. It is inked, and L frees it. */
+  private blocking: { bench: Bench; faces: Set<number> } | null = null;
+  /** When true, a made fold is locked to the paper it lands on, as if creased and held down. */
+  private lockFolds = true;
   /** The flap lit up under the pointer. */
   private hover: { bench: Bench; face: number; size: number; revision: number } | null = null;
   private readonly raycaster = new Raycaster();
@@ -187,6 +241,8 @@ export class FoldLab {
     this.ghost = new FoldGhost(overlay);
     this.hint = new FlapHint(overlay);
     this.tag = new AngleTag(canvas.parentElement as HTMLElement);
+    this.brush = new LockBrush(overlay, BRUSH_RADIUS);
+    this.tether = new Tether(overlay);
     this.addBench(this.blank());
     canvas.addEventListener('pointerdown', this.onDown);
     window.addEventListener('pointermove', this.onMove);
@@ -205,9 +261,9 @@ export class FoldLab {
   }
 
   private addBench(piece: SheetPiece): Bench {
-    const view = new SheetView(piece);
+    const view = new SheetView(piece, this.marks);
     this.group.add(view.group);
-    const bench: Bench = { piece, view, flap: new SwingFlap(piece, this.group), shown: [] };
+    const bench: Bench = { piece, view, flap: new SwingFlap(piece, this.group), shown: [], pressed: null };
     this.benches.push(bench);
     return bench;
   }
@@ -224,6 +280,8 @@ export class FoldLab {
     for (const bench of [...this.benches]) this.removeBench(bench);
     this.dragging = null;
     this.active = null;
+    this.blocking = null;
+    this.freed = null;
     this.ghost.hide();
   }
 
@@ -232,6 +290,9 @@ export class FoldLab {
     this.ghost.group.removeFromParent();
     this.hint.dispose();
     this.tag.dispose();
+    this.marks.dispose();
+    this.brush.dispose();
+    this.tether.dispose();
     this.group.removeFromParent();
     this.canvas.removeEventListener('pointerdown', this.onDown);
     window.removeEventListener('pointermove', this.onMove);
@@ -254,8 +315,12 @@ export class FoldLab {
   // ---- Input ----
 
   private ray(event: PointerEvent | WheelEvent): void {
+    this.rayAt(event.clientX, event.clientY);
+  }
+
+  private rayAt(clientX: number, clientY: number): void {
     const rect = this.canvas.getBoundingClientRect();
-    this.pointer.set(((event.clientX - rect.left) / rect.width) * 2 - 1, -((event.clientY - rect.top) / rect.height) * 2 + 1);
+    this.pointer.set(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
     this.raycaster.setFromCamera(this.pointer, this.camera);
   }
 
@@ -321,6 +386,10 @@ export class FoldLab {
       event.stopPropagation();
       return;
     }
+    if (this.tool === 'lock') {
+      this.startStroke(event);
+      return;
+    }
 
     const held = this.markerUnderPointer();
     if (held) {
@@ -341,6 +410,8 @@ export class FoldLab {
   }
 
   private readonly onMove = (event: PointerEvent): void => {
+    // Keys act on the paper under the pointer, and not through the panels over the canvas.
+    this.pointerAt = event.target === this.canvas ? { x: event.clientX, y: event.clientY } : null;
     if (this.posing) {
       this.turnJoint(event);
       return;
@@ -349,6 +420,10 @@ export class FoldLab {
       this.ray(event);
       const point = this.raycaster.ray.intersectPlane(this.dragPlane, new Vector3());
       if (point) this.cutTo = { x: point.x, z: point.z };
+      return;
+    }
+    if (this.stroke) {
+      this.continueStroke(event);
       return;
     }
     const grip = this.dragging;
@@ -411,6 +486,10 @@ export class FoldLab {
       this.finishCut();
       return;
     }
+    if (this.stroke) {
+      this.endStroke();
+      return;
+    }
     const grip = this.dragging;
     const press = this.press;
     this.dragging = null;
@@ -430,8 +509,9 @@ export class FoldLab {
   // ---- Showing what the pointer would take hold of ----
 
   private updateHover(event: PointerEvent): void {
-    if (event.buttons !== 0 || event.target !== this.canvas || this.flapsBusy() || (this.tool !== 'fold' && !this.completed)) {
+    if (event.buttons !== 0 || event.target !== this.canvas || this.flapsBusy() || (this.tool === 'cut' && !this.completed)) {
       this.fadeHover();
+      this.brush.hide();
       return;
     }
     this.ray(event);
@@ -439,11 +519,25 @@ export class FoldLab {
       this.hoverJoint();
       return;
     }
+    if (this.tool === 'lock') {
+      this.hoverLock(event);
+      return;
+    }
     const hit = this.markerUnderPointer() ? null : this.pick(event.ctrlKey);
     const fromAbove = (hit?.fromAbove ?? true) && !event.ctrlKey;
     const face = hit && !hit.bench.piece.pulling ? this.faceOn(hit.bench, hit.tri, fromAbove) : -1;
     if (!hit || face < 0) {
       this.fadeHover();
+      return;
+    }
+    // Locked paper cannot be taken hold of. It lights up in ink instead: what L would free.
+    if (hit.bench.piece.held.has(face)) {
+      this.canvas.style.cursor = 'not-allowed';
+      if (this.hover?.bench === hit.bench && this.hover.face === face) return;
+      const { piece } = hit.bench;
+      const region = this.lockRegion(piece, face, !fromAbove, false);
+      this.hover = { bench: hit.bench, face, size: region.size, revision: piece.revision };
+      this.hint.show(piece.soft.mesh, region, 'lock');
       return;
     }
     const { hover } = this;
@@ -485,10 +579,10 @@ export class FoldLab {
   }
 
   private fadeHover(): void {
+    this.canvas.style.cursor = '';
     if (!this.hover) return;
     this.hover = null;
     this.hint.hide();
-    this.canvas.style.cursor = '';
   }
 
   private clearHover(): void {
@@ -648,6 +742,11 @@ export class FoldLab {
     const { piece } = bench;
     const face = this.faceOn(bench, tri, hit.fromAbove);
     if (face < 0) return null;
+    if (piece.held.has(face)) {
+      this.shake.add(0.05);
+      this.setMessage('Locked. Press L over it, or use the Lock tool, to free it.');
+      return null;
+    }
     const flat = this.flatPoint(bench, tri, b0, b1, b2);
     if (this.grips.length >= MAX_PINS) this.letGo(this.grips[0] as Grip);
 
@@ -709,6 +808,7 @@ export class FoldLab {
       this.active = null;
       this.assessment = null;
       this.ghost.hide();
+      this.showBlocking(grip.bench, null);
     }
   }
 
@@ -738,7 +838,7 @@ export class FoldLab {
       return;
     }
     const failure = assessment?.plan.failure;
-    if (failure === 'layers-cross') this.reportFailure(failure);
+    if (failure === 'layers-cross' || failure === 'held') this.reportFailure(failure);
     this.letGo(grip);
   }
 
@@ -767,10 +867,11 @@ export class FoldLab {
     const key = `${grip.slot}:${guess.line.kind}:${guess.line.c}:${guess.side}:${landing.kind}`;
     if (key !== this.planKey || !this.cachedPlan) {
       this.planKey = key;
-      this.cachedPlan = piece.book.plan({ line: guess.line, side: guess.side, seeds: grip.seeds, landing });
+      this.cachedPlan = piece.plan({ line: guess.line, side: guess.side, seeds: grip.seeds, landing });
     }
     const plan = this.cachedPlan;
     const reachable = !plan.failure && guess.miss < SNAP_RADIUS;
+    this.showBlocking(grip.bench, plan.failure === 'held' && guess.miss < SNAP_RADIUS ? plan.moved : null);
     // Only a fold the hand is bringing the paper to. A hand wheeled up is holding paper
     // up, as when opening a wing, and lifting for a fold there would break the wing apart.
     if (grip.carried && !this.completed) {
@@ -778,6 +879,21 @@ export class FoldLab {
       else if (grip.flap.size > 0) this.liftFold(grip, grip.flap, null, !grip.fromAbove);
     }
     return { guess, plan, landing, reachable };
+  }
+
+  /** Lights up the locked paper a lined-up fold would have to move, or clears it. */
+  private showBlocking(bench: Bench, moved: ReadonlySet<number> | null): void {
+    const faces = moved ? new Set([...moved].filter((f) => bench.piece.held.has(f))) : null;
+    const same = this.blocking && faces && this.blocking.bench === bench && this.blocking.faces.size === faces.size;
+    if (same || (!this.blocking && !faces)) return;
+    this.blocking = faces ? { bench, faces } : null;
+    if (faces) {
+      this.hover = null;
+      this.hint.show(bench.piece.soft.mesh, faces, 'lock');
+      this.setMessage('Locked paper is in the way of this fold. Press L to free it.');
+    } else if (!this.hover && !this.freed) {
+      this.hint.hide();
+    }
   }
 
   /** The hand now holds this paper: what a fold will move, bending along its line, or its own flap. */
@@ -836,7 +952,7 @@ export class FoldLab {
     const { piece } = bench;
     this.dropGrip(grip);
     this.remember();
-    const done = this.foldBench(bench, landing, guess.line, guess.side, seeds, false);
+    const done = this.foldBench(bench, landing, guess.line, guess.side, seeds, false, piece.restPoint(grip.face, grip.flat.x, grip.flat.z));
     if (done.failure) {
       this.history.pop();
       this.reportFailure(done.failure);
@@ -844,7 +960,8 @@ export class FoldLab {
     }
     void plan;
     this.log = [...this.log, this.stepFor(piece, guess, seeds, landing)];
-    this.setMessage(`Creased along a ${LINE_NAMES[guess.line.kind]} line. ${piece.book.tallest} layers at the thickest.`);
+    const locked = this.lockFolds ? ' and locked down' : '';
+    this.setMessage(`Creased along a ${LINE_NAMES[guess.line.kind]} line${locked}. ${piece.book.tallest} layers at the thickest.`);
   }
 
   private stepFor(piece: SheetPiece, guess: FoldGuess, seeds: readonly number[], landing: Landing): FoldStep {
@@ -852,13 +969,20 @@ export class FoldLab {
     return { action: 'fold', label: 'By hand', kind: guess.line.kind, at, side: guess.side, grip: seeds.length === 1 ? 'top' : 'all', landing };
   }
 
-  private foldBench(bench: Bench, landing: Landing, line: MirrorLine, side: number, seeds: readonly number[], swing: boolean): FoldPlan {
+  private foldBench(bench: Bench, landing: Landing, line: MirrorLine, side: number, seeds: readonly number[], swing: boolean, from: { x: number; z: number }): PiecePlan {
     const { piece } = bench;
     const before = piece.corners();
     const frame = piece.frameOf(new Set());
     const axis = swing ? this.axisFor(piece, line, frame, side, landing) : null;
-    const plan = piece.fold({ line, side, seeds, landing }, swing);
+    const was = new Set(piece.held);
+    const plan = piece.fold({ line, side, seeds, landing }, swing, this.lockFolds);
     if (plan.failure) return plan;
+    // Paper the fold locked is inked once it lands, spreading out from where it was held.
+    const pressed = new Set([...piece.held].filter((f) => !was.has(f)));
+    if (pressed.size > 0) {
+      this.marks.hide(pressed);
+      bench.pressed = { faces: pressed, from };
+    }
     bench.flap.start(plan.moved, before, axis);
     bench.view.update(bench.flap.hidden);
     for (const grip of this.grips.filter((g) => g.bench === bench)) grip.peeled = false;
@@ -884,12 +1008,16 @@ export class FoldLab {
     return { origin, direction, angle };
   }
 
-  private reportFailure(failure: FoldFailure): void {
+  private reportFailure(failure: FoldRefusal): void {
     this.shake.add(0.3);
     this.setMessage(FAILURE_TEXT[failure]);
   }
 
   private landed(bench: Bench): void {
+    if (bench.pressed) {
+      this.marks.press(bench.pressed.faces, bench.pressed.from);
+      bench.pressed = null;
+    }
     // The crease presses flat: a thud along the line, and scraps kicked out.
     const { piece } = bench;
     const { x } = piece.soft;
@@ -902,7 +1030,8 @@ export class FoldLab {
   }
 
   private remember(): void {
-    this.history.push({ book: (this.benches[0] as Bench).piece.book.clone(), log: this.log, recipeNext: this.recipe?.next ?? 0 });
+    const { piece } = this.benches[0] as Bench;
+    this.history.push({ book: piece.book.clone(), held: [...piece.held], log: this.log, recipeNext: this.recipe?.next ?? 0 });
   }
 
   /** Lab only: the game itself has no undo. */
@@ -916,7 +1045,7 @@ export class FoldLab {
     this.clearBenches();
     this.log = snapshot.log;
     if (this.recipe) this.recipe.next = snapshot.recipeNext;
-    this.addBench(new SheetPiece(this.dressed(), snapshot.book));
+    this.addBench(new SheetPiece(this.dressed(), snapshot.book, {}, undefined, snapshot.held));
     this.completed = false;
     this.setMessage('Stepped back.');
   }
@@ -1014,7 +1143,11 @@ export class FoldLab {
     } else {
       const { piece } = bench;
       const request = foldRequest(piece.book, piece.definition.size, step);
-      const plan = this.foldBench(bench, step.landing ?? { kind: 'over' }, request.line, request.side, request.seeds, true);
+      const landing = step.landing ?? { kind: 'over' };
+      // Following the steps, a crew frees whatever the next fold has to move.
+      const moving = piece.book.plan({ line: request.line, side: request.side, seeds: request.seeds, landing });
+      if (!moving.failure) piece.lock(moving.moved, false);
+      const plan = this.foldBench(bench, landing, request.line, request.side, request.seeds, true, restMiddle(piece, moving.moved));
       if (plan.failure) {
         this.history.pop();
         this.recipe.next--;
@@ -1051,9 +1184,9 @@ export class FoldLab {
   }
 
   /** Applies a recipe at once, for screenshots. */
-  applyRecipe(id: string, steps = Infinity): (FoldFailure | null)[] {
+  applyRecipe(id: string, steps = Infinity): (FoldRefusal | null)[] {
     this.openRecipe(id);
-    const results: (FoldFailure | null)[] = [];
+    const results: (FoldRefusal | null)[] = [];
     const recipe = this.recipe as unknown as { recipe: Recipe; next: number };
     for (const step of recipe.recipe.steps.slice(0, steps)) {
       const bench = this.benches[0] as Bench;
@@ -1172,10 +1305,21 @@ export class FoldLab {
     else this.updateGuide(dt);
     for (const bench of this.benches) this.showJoints(bench, dt);
     this.tag.update(dt);
+    this.marks.update(dt);
+    this.paint(dt);
+    this.brush.update(dt);
+    this.showStrain();
+    if (this.freed) {
+      this.freed.left -= dt;
+      if (this.freed.left <= 0 || this.hover) {
+        if (!this.hover) this.hint.hide();
+        this.freed = null;
+      }
+    }
     for (const bench of this.benches) bench.view.update(bench.flap.hidden);
     const { hover } = this;
     if (hover && hover.bench.piece.revision !== hover.revision) this.clearHover();
-    this.hint.update(dt, this.hover?.bench.piece.soft.x ?? null);
+    this.hint.update(dt, (this.hover ?? this.freed ?? this.blocking)?.bench.piece.soft.x ?? null);
     for (const grip of this.grips) {
       grip.marker.group.position.set(grip.pin.heldX, grip.pin.heldY, grip.pin.heldZ);
       grip.marker.update(dt, this.camera);
@@ -1192,6 +1336,223 @@ export class FoldLab {
     grip.pin.y += (grip.target.y - grip.pin.y) * k;
     grip.pin.z += (grip.target.z - grip.pin.z) * k;
   }
+
+  // ---- Locking paper ----
+
+  /** Whether a made fold locks down with the paper it lands on. */
+  setLockFolds(locked: boolean): void {
+    this.lockFolds = locked;
+    this.setMessage(locked ? 'New folds lock down where they land.' : 'New folds stay loose.');
+  }
+
+  /** Locks every sheet where it lies, or frees them all. */
+  lockAll(locked: boolean): void {
+    if (this.completed || this.flapsBusy()) return;
+    let count = 0;
+    for (const bench of this.benches) count += this.setLock(bench, bench.piece.book.faces, locked, { x: 0, z: 0 }, null);
+    if (count > 0) this.setMessage(locked ? 'Locked everything. Free what you want to fold.' : 'Everything is free.');
+  }
+
+  /**
+   * Locks or frees the flap under the pointer: the L key. With Shift, every layer there.
+   * While a lined-up fold is blocked by locked paper, it frees that paper instead.
+   */
+  toggleLockUnderPointer(every: boolean): void {
+    if (this.completed || this.flapsBusy() || this.stroke) return;
+    if (this.blocking) {
+      const { bench, faces } = this.blocking;
+      this.blocking = null;
+      if (this.setLock(bench, faces, false, { x: 0, z: 0 }, null) > 0) this.setMessage('Freed what was in the way. Drop the pin to fold.');
+      return;
+    }
+    if (!this.pointerAt) return;
+    this.rayAt(this.pointerAt.x, this.pointerAt.y);
+    const hit = this.markerUnderPointer() ? null : this.pick();
+    if (!hit) return;
+    const face = this.faceOn(hit.bench, hit.tri, hit.fromAbove);
+    if (face < 0) return;
+    const { piece } = hit.bench;
+    const locking = !piece.held.has(face);
+    const flat = this.flatPoint(hit.bench, hit.tri, hit.b0, hit.b1, hit.b2);
+    const region = this.lockRegion(piece, face, !hit.fromAbove, every);
+    if (this.setLock(hit.bench, region, locking, piece.restPoint(face, flat.x, flat.z), this.hitPoint(hit)) > 0) {
+      this.setMessage(locking ? LOCKED_TEXT : FREED_TEXT);
+    }
+  }
+
+  /** What a click or L locks or frees: the flap at a face, or with Shift every layer there. */
+  private lockRegion(piece: SheetPiece, face: number, under: boolean, every: boolean): Set<number> {
+    if (!every) return piece.flapOf(face, under);
+    const region = new Set<number>();
+    for (const f of piece.book.stackOf(face)) for (const g of piece.flapOf(f, under)) region.add(g);
+    return region;
+  }
+
+  /**
+   * Locks paper or frees it. Locking inks it from the point pressed, with a small
+   * thud; freeing makes it glow for a moment, so it is clear what came loose.
+   */
+  private setLock(bench: Bench, faces: Iterable<number>, locking: boolean, from: { x: number; z: number }, at: Vector3 | null): number {
+    const { piece } = bench;
+    const changed = piece.lock(faces, locking);
+    if (changed.size === 0) return 0;
+    this.planKey = '';
+    if (locking) {
+      this.marks.press(changed, from);
+      // A hand on paper that is now held has nothing left to pull.
+      for (const grip of this.grips.filter((g) => g.bench === bench && piece.held.has(g.face))) this.dropGrip(grip);
+      this.shake.add(0.05);
+      if (at) this.scraps.burst(at, 6, [piece.definition.top, piece.definition.bottom], 0.35, 0.5);
+    }
+    this.regrip(bench);
+    if (!locking) {
+      this.clearHover();
+      this.hint.show(piece.soft.mesh, changed, 'lift');
+      this.freed = { bench, left: FREED_GLOW };
+    }
+    this.notify();
+    return changed.size;
+  }
+
+  /** With the lock tool, what a click would lock or free lights up, and the brush follows the pointer. */
+  private hoverLock(event: PointerEvent): void {
+    const hit = this.pick(event.ctrlKey);
+    const under = event.ctrlKey || !(hit?.fromAbove ?? true);
+    const face = hit ? this.faceOn(hit.bench, hit.tri, !under) : -1;
+    if (!hit || face < 0) {
+      this.fadeHover();
+      this.brush.hide();
+      return;
+    }
+    const { piece } = hit.bench;
+    const locking = !piece.held.has(face);
+    this.brush.show(this.hitPoint(hit), locking);
+    this.canvas.style.cursor = 'crosshair';
+    const { hover } = this;
+    if (hover?.bench === hit.bench && hover.face === face) return;
+    const region = this.lockRegion(piece, face, under, event.shiftKey);
+    this.hover = { bench: hit.bench, face, size: region.size, revision: piece.revision };
+    this.hint.show(piece.soft.mesh, region, locking ? 'lock' : 'lift');
+  }
+
+  /** The lock tool pressed on paper. Locking or freeing is decided by what was pressed. */
+  private startStroke(event: PointerEvent): void {
+    const hit = this.pick(event.ctrlKey);
+    const under = event.ctrlKey || !(hit?.fromAbove ?? true);
+    const face = hit ? this.faceOn(hit.bench, hit.tri, !under) : -1;
+    if (!hit || face < 0) return;
+    const { piece } = hit.bench;
+    const flat = this.flatPoint(hit.bench, hit.tri, hit.b0, hit.b1, hit.b2);
+    this.stroke = {
+      bench: hit.bench,
+      face,
+      flat,
+      at: this.hitPoint(hit),
+      locking: !piece.held.has(face),
+      under,
+      every: event.shiftKey,
+      panel: piece.flatRegion(face),
+      x: event.clientX,
+      y: event.clientY,
+      moved: false,
+      // A stroke paints from where it was pressed, however quick the first move.
+      last: { x: flat.x, z: flat.z, face },
+      pending: new Set(),
+    };
+    this.paintClock = 0;
+    this.brush.press();
+    this.setOrbit(false);
+    event.stopPropagation();
+  }
+
+  /** Dragging paints: everything under the brush on the paper first pressed. */
+  private continueStroke(event: PointerEvent): void {
+    const stroke = this.stroke as LockStroke;
+    if (!stroke.moved) {
+      if (Math.hypot(event.clientX - stroke.x, event.clientY - stroke.y) < DRAG_START) return;
+      stroke.moved = true;
+      this.fadeHover();
+    }
+    this.ray(event);
+    const hit = this.pick(stroke.under);
+    if (!hit || hit.bench !== stroke.bench) return;
+    const { piece } = stroke.bench;
+    const point = this.flatPoint(hit.bench, hit.tri, hit.b0, hit.b1, hit.b2);
+    this.brush.show(this.hitPoint(hit), stroke.locking);
+    this.canvas.style.cursor = 'crosshair';
+    // Paint in between pointer events too, so a quick stroke leaves no gaps.
+    const from = stroke.last ?? point;
+    const steps = Math.max(1, Math.ceil(Math.hypot(point.x - from.x, point.z - from.z) / (BRUSH_RADIUS / 2)));
+    for (let i = 1; i <= steps; i++) {
+      const x = from.x + ((point.x - from.x) * i) / steps, z = from.z + ((point.z - from.z) * i) / steps;
+      for (const f of piece.facesWithin(x, z, BRUSH_RADIUS)) if (stroke.every || stroke.panel.has(f)) stroke.pending.add(f);
+    }
+    stroke.last = { x: point.x, z: point.z, face: this.faceOn(hit.bench, hit.tri, !stroke.under) };
+  }
+
+  /** Painted locks land a few times a second, not on every pointer event. */
+  private paint(dt: number): void {
+    const { stroke } = this;
+    if (!stroke || stroke.pending.size === 0) return;
+    this.paintClock -= dt;
+    if (this.paintClock > 0) return;
+    this.paintClock = PAINT_INTERVAL;
+    this.flushPaint(stroke);
+  }
+
+  private flushPaint(stroke: LockStroke): void {
+    const { piece } = stroke.bench;
+    const last = stroke.last;
+    const from = last && last.face >= 0 ? piece.restPoint(last.face, last.x, last.z) : piece.restPoint(stroke.face, stroke.flat.x, stroke.flat.z);
+    if (this.setLock(stroke.bench, stroke.pending, stroke.locking, from, null) > 0) this.brush.press();
+    stroke.pending.clear();
+  }
+
+  /** A click locks or frees the whole flap; a drag has already painted. */
+  private endStroke(): void {
+    const stroke = this.stroke as LockStroke;
+    this.stroke = null;
+    this.setOrbit(true);
+    const { bench, face, under, every, locking } = stroke;
+    const { piece } = bench;
+    if (stroke.moved) {
+      if (stroke.pending.size > 0) this.flushPaint(stroke);
+      this.setMessage(locking ? 'Painted a lock: that paper stays put now.' : 'Painted it free: that paper can move now.');
+      return;
+    }
+    const region = this.lockRegion(piece, face, under, every);
+    if (this.setLock(bench, region, locking, piece.restPoint(face, stroke.flat.x, stroke.flat.z), stroke.at) > 0) {
+      this.setMessage(locking ? LOCKED_TEXT : FREED_TEXT);
+    }
+  }
+
+  /** Where a picked point of paper is in the world. */
+  private hitPoint(hit: NonNullable<ReturnType<FoldLab['pick']>>): Vector3 {
+    const { x, mesh } = hit.bench.piece.soft;
+    const point = new Vector3();
+    const weights = [hit.b0, hit.b1, hit.b2];
+    for (let k = 0; k < 3; k++) {
+      const v = (mesh.tris[hit.tri * 3 + k] as number) * 3;
+      const w = weights[k] as number;
+      point.x += (x[v] as number) * w;
+      point.y += (x[v + 1] as number) * w;
+      point.z += (x[v + 2] as number) * w;
+    }
+    return point;
+  }
+
+  /** A hand that paper is holding back strains: the pin shivers, and a line runs to where it aims. */
+  private showStrain(): void {
+    for (const grip of this.grips) grip.marker.setStrain(grip === this.dragging ? Math.min(1, grip.pin.strain / FULL_STRAIN) : 0);
+    const grip = this.dragging;
+    if (!grip || grip.pin.strain < 0.08) {
+      this.tether.hide();
+      return;
+    }
+    const { pin } = grip;
+    this.tether.show(new Vector3(pin.heldX, pin.heldY + 0.62, pin.heldZ), new Vector3(pin.x, pin.y + 0.62, pin.z), Math.max(0.2, Math.min(1, pin.strain / FULL_STRAIN)));
+  }
+
 
   /** Runs the simulation forward with no drawing, for screenshots. */
   settle(steps = SETTLE_STEPS): void {
@@ -1219,11 +1580,15 @@ export class FoldLab {
     pin.z = z;
   }
 
-  private height(): number {
+  /** The highest point of paper, or of paper lying in its stacks when `resting`. */
+  private height(resting = false): number {
     let top = 0;
     for (const bench of this.benches) {
-      const { x } = bench.piece.soft;
-      for (let i = 1; i < x.length; i += 3) top = Math.max(top, x[i] as number);
+      const { x, mesh } = bench.piece.soft;
+      for (let t = 0; t < mesh.triCount; t++) {
+        if (resting && (mesh.triFlap[t] as number) >= 0) continue;
+        for (let k = 0; k < 3; k++) top = Math.max(top, x[(mesh.tris[t * 3 + k] as number) * 3 + 1] as number);
+      }
     }
     return top;
   }
@@ -1254,10 +1619,13 @@ export class FoldLab {
       paper: this.paper,
       floppiness: this.definition.floppiness,
       height: this.height(),
+      resting: this.height(true),
       lowest: this.benches.reduce((low, b) => Math.min(low, b.view.lowest), Infinity),
       hoverFaces: this.hover?.size ?? 0,
       liftedFaces: this.benches.reduce((sum, b) => sum + b.piece.lifted.size, 0),
-      held: active ? { x: active.pin.heldX, y: active.pin.heldY, z: active.pin.heldZ, ready: assessment?.reachable ?? false, from: active.flat, to: this.aimedAt } : null,
+      lockedFaces: this.benches.reduce((sum, b) => sum + b.piece.held.size, 0),
+      lockFolds: this.lockFolds,
+      held: active ? { x: active.pin.heldX, y: active.pin.heldY, z: active.pin.heldZ, ready: assessment?.reachable ?? false, from: active.flat, to: this.aimedAt, strain: active.pin.strain } : null,
       recipe: this.recipe,
     };
   }
@@ -1270,9 +1638,28 @@ const OPEN_FAILURE_TEXT: Record<ReshapeFailure, string> = {
   'no-layer-order': 'no layer order works.',
 };
 
-const FAILURE_TEXT: Record<FoldFailure, string> = {
+const FAILURE_TEXT: Record<FoldRefusal, string> = {
   'not-a-grid-line': 'That is not on the grid.',
   'nothing-moves': 'Nothing on that side to fold.',
   'nothing-stays': 'All the paper would move.',
   'layers-cross': 'Layers would have to pass through each other.',
+  held: 'Locked paper would have to move. Free it first: L over it, or the Lock tool.',
 };
+
+const LOCKED_TEXT = 'Locked: it stays put, whatever is pulled around it.';
+const FREED_TEXT = 'Free: it can be lifted and folded now.';
+
+/** The middle of some paper on the unfolded sheet, for marks to spread out from. */
+function restMiddle(piece: SheetPiece, faces: Iterable<number>): { x: number; z: number } {
+  const { rest, span } = piece.book;
+  let x = 0, z = 0, count = 0;
+  for (const f of faces) {
+    for (let k = 0; k < 3; k++) {
+      x += rest[f * 6 + k * 2] as number;
+      z += rest[f * 6 + k * 2 + 1] as number;
+      count++;
+    }
+  }
+  if (count === 0) return { x: 0, z: 0 };
+  return { x: (x / count - span / 2) * piece.unit, z: (z / count - span / 2) * piece.unit };
+}

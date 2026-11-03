@@ -20,6 +20,10 @@ Opens the Fold Lab at http://localhost:5173.
 | Wheel while dragging | Raise or lower |
 | Shift + drag | Grip every layer |
 | Ctrl | Reach the underside: the flap below |
+| L | Lock or free the flap under the pointer. Shift: every layer |
+| Lock tool | Click a flap to lock or free it, or drag to paint part of one |
+| U | Free everything |
+| Folds lock / Folds stay loose | Whether a new fold locks down with what it lands on |
 | Enter | Mark it complete: flaps become hinges |
 | Drag a flap, once complete | Set its angle. Shift turns it freely |
 | N | Next recipe step |

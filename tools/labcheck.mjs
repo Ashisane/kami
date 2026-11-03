@@ -35,7 +35,7 @@ const wait = (ms) => page.waitForTimeout(ms);
 const screen = (x, y, z) => page.evaluate(([a, b, c]) => window.kami.screenOf(a, b, c), [x, y, z]);
 
 /** A real drag between two flat sheet points, in small steps, as a hand would. */
-async function drag(from, to, { y = 0.03, steps = 28, shift = false, hold = 500, midShot, lift = 0 } = {}) {
+async function drag(from, to, { y = 0.03, steps = 28, shift = false, hold = 500, midShot, lift = 0, during } = {}) {
   const [sx, sy] = await screen(from[0], y, from[1]);
   const [ex, ey] = await screen(to[0], y, to[1]);
   if (shift) await page.keyboard.down('Shift');
@@ -47,6 +47,7 @@ async function drag(from, to, { y = 0.03, steps = 28, shift = false, hold = 500,
   }
   if (lift) await page.mouse.wheel(0, -lift);
   await wait(hold);
+  if (during) await during();
   if (midShot) await shot(midShot);
   await page.mouse.up();
   if (shift) await page.keyboard.up('Shift');
@@ -89,7 +90,10 @@ try {
   // The camera glides into place on load, and aiming the mouse mid-glide would miss.
   await wait(3000);
   check('opens on the sheet in the Fold Lab', (await lab())?.tallest === 1);
+  check('folds lock down by default', (await lab()).lockFolds === true);
   await shot('start');
+  // These checks are about loose paper; locking has its own below.
+  await page.locator('.segment', { hasText: 'Folds stay loose' }).click();
 
   // 1. Two players hold the far corners, a third pulls the near edge across.
   await pin(4.6, -4.6);
@@ -204,15 +208,39 @@ try {
   check('and it can go back to folding', !r.completed, r.message);
 
   // 6b. Fold the plane's top wing by hand, at step 9, where the flaps lie over it.
+  // The recipe's folds lock down, so nothing needs pinning: free the top wing with L and pull it.
   // Seven folds: cutting the sheet to size is a step, but not a fold.
+  await page.locator('.segment', { hasText: 'Folds lock' }).click();
   r = await buildRecipe('plane-half', 'Nakamura Plane', 7);
-  await pin(-2.3, 3.5);
-  await pin(-2.3, 0.5);
+  check('the recipe locks its folds down', r.lockedFaces > r.faces * 0.9, `${r.lockedFaces} of ${r.faces} faces`);
+  await drag([-4.5, 3], [-1.5, 3], { hold: 400 });
+  r = await lab();
+  check('locked paper cannot be pulled', r.pins === 0 && /Locked/.test(r.message), r.message);
+  const [wingX, wingY] = await screen(-4, 0.1, 3);
+  await page.mouse.move(wingX, wingY);
+  await wait(250);
+  await page.keyboard.press('l');
+  await wait(500);
+  const freedWing = await lab();
+  check('L over the top wing frees it', freedWing.lockedFaces < r.lockedFaces, `${r.lockedFaces} to ${freedWing.lockedFaces} faces locked`);
+  await shot('plane-wing-freed');
   // From 0.5 m to 3.5 m on the flat sheet: halfway is x = 2, in the middle of its snap band.
-  await drag([-4.5, 3], [-1.5, 3], { hold: 1100, midShot: 'plane-wing-by-hand' });
+  await drag([-4.5, 3], [-1.5, 3], { hold: 1100 });
+  r = await lab();
+  // The wing fold carries layers still locked under the flap that was freed: they light up, and L frees them.
+  check('a fold that locked paper is in the way of says how to free it', !r.held?.ready && /in the way/.test(r.message), r.message);
+  await shot('plane-wing-blocked');
+  await page.keyboard.press('l');
+  let bodyRose = 0;
+  for (let i = 0; i < 14; i++) {
+    await wait(100);
+    bodyRose = Math.max(bodyRose, (await lab()).resting);
+  }
+  await shot('plane-wing-by-hand');
   r = await lab();
   const aim = (p) => p ? `${(p.x + 5).toFixed(2)}, ${(p.z + 5).toFixed(2)}` : 'none';
-  check("the top wing lifts and is ready to fold on the x = 2 line", r.held?.ready === true, `grabbed at ${aim(r.held?.from)}, aimed at ${aim(r.held?.to)}, hand in the world at ${r.held?.x.toFixed(2)}, ${r.held?.y.toFixed(2)}, ${r.held?.z.toFixed(2)}`);
+  check("L frees it, and the top wing lifts, ready to fold on the x = 2 line", r.held?.ready === true, `grabbed at ${aim(r.held?.from)}, aimed at ${aim(r.held?.to)}, hand in the world at ${r.held?.x.toFixed(2)}, ${r.held?.y.toFixed(2)}, ${r.held?.z.toFixed(2)}`);
+  check('and the locked body stays down, with no pins', bodyRose < 0.15 && r.height > 0.8, `body reaches ${bodyRose.toFixed(3)} m, the wing ${r.height.toFixed(2)} m`);
   await page.keyboard.press('Space');
   await wait(1400);
   r = await lab();
@@ -220,7 +248,69 @@ try {
   await shot('plane-wing-folded-by-hand');
   await page.keyboard.press('Escape');
 
+  // 6c. The owner's case: an A4 corner folded over, then only its top layer folded back.
+  await page.keyboard.press('r');
+  await wait(300);
+  await page.locator('.segment', { hasText: 'A4' }).click();
+  await wait(700);
+  await drag([3.2, 4.7], [-2.2, -0.7], { hold: 900 });
+  await page.keyboard.press('Space');
+  await wait(1600);
+  r = await lab();
+  check('a corner fold locks down with the paper it lands on', r.folds === 1 && r.lockedFaces > 0 && r.resting < 0.05, `${r.lockedFaces} faces locked, resting at ${r.resting.toFixed(3)} m`);
+  await shot('corner-locked');
+  const [flapX, flapY] = await screen(-1.2, 0.05, 0.6);
+  await page.mouse.move(flapX, flapY);
+  await wait(250);
+  await page.keyboard.press('l');
+  await wait(150);
+  await shot('corner-freed');
+  const freedFlap = await lab();
+  check('L frees the flap, and the layer under it stays locked', freedFlap.lockedFaces > 0 && freedFlap.lockedFaces < r.lockedFaces, `${r.lockedFaces} to ${freedFlap.lockedFaces} faces locked`);
+  await wait(500);
+  let underRose = 0;
+  await drag([-2.1, -0.6], [1.1, 2.6], { hold: 600, midShot: 'corner-tip-pulled', during: async () => {
+    for (let i = 0; i < 6; i++) {
+      underRose = Math.max(underRose, (await lab()).resting);
+      await wait(80);
+    }
+  } });
+  r = await lab();
+  check('pulling only the top layer, the layer under it stays on the table', r.held?.ready === true && underRose < 0.05 && r.height > 1, `the flap reaches ${r.height.toFixed(2)} m, the paper under it ${underRose.toFixed(3)} m`);
+  await page.keyboard.press('Space');
+  await wait(1600);
+  r = await lab();
+  check('and it folds only that layer', r.folds === 2 && r.tallest === 3, `${r.folds} folds, ${r.tallest} layers, ${r.message}`);
+  await shot('corner-tip-folded');
+
+  // 6d. Paint a lock across the free paper, then pull past where it reaches.
+  await page.locator('.segment', { hasText: 'Lock' }).first().click();
+  const before = (await lab()).lockedFaces;
+  const [ax, ay] = await screen(2.6, 0.05, -4.2);
+  const [bx, by] = await screen(-2.8, 0.05, -4.2);
+  await page.mouse.move(ax, ay);
+  await page.mouse.down();
+  await page.mouse.move(bx, by, { steps: 30 });
+  await wait(150);
+  await shot('lock-painting');
+  await page.mouse.up();
+  await wait(600);
+  r = await lab();
+  check('dragging the lock tool paints a lock', r.lockedFaces > before + 40, `${before} to ${r.lockedFaces} faces locked`);
+  await page.locator('.segment', { hasText: 'Fold' }).first().click();
+  await drag([2.8, -1.6], [9, -1.6], { hold: 900, midShot: 'lock-strain' });
+  r = await lab();
+  check('pulling free paper far from locked paper strains, and does not tear it', r.held?.strain > 1 && r.stretch < 0.03, `straining ${r.held?.strain.toFixed(2)} m past its reach, ${(r.stretch * 100).toFixed(1)}% stretch`);
+  await page.keyboard.press('Escape');
+  await wait(400);
+  await page.keyboard.press('u');
+  await wait(400);
+  check('U unlocks everything', (await lab()).lockedFaces === 0);
+  await page.locator('.segment', { hasText: 'Square' }).click();
+  await wait(400);
+
   // 7. Real recipes, step by step, then open the plane's wing by hand.
+  await page.locator('.segment', { hasText: 'Folds stay loose' }).click();
   r = await buildRecipe('plane', 'Nakamura Plane', 9);
   const box = await page.evaluate(() => window.kami.crossings());
   check('the folded plane is not passing through itself', box === 0, `${box} crossings`);

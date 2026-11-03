@@ -43,6 +43,14 @@ export interface Pin {
   heldX: number;
   heldY: number;
   heldZ: number;
+  /** Where the held point sat on the unfolded sheet, once for each layer held: x z pairs, in metres. */
+  rest: Float64Array;
+  /** How far the held point can get from each point of locked paper, in metres. */
+  reach: Float64Array;
+  /** How far it can get from each other pin's held point, in metres. */
+  span: Map<Pin, number>;
+  /** How far past the paper's reach the hand is trying to go, in metres. */
+  strain: number;
 }
 
 const BEND_COMPLIANCE = 0.02;
@@ -56,6 +64,9 @@ const CREASE_COMPLIANCE = 0.0015;
 const BEND_LIMIT = 0.85;
 /** Fastest a hand can drag paper, in metres per second. Faster and layers tunnel. */
 const HAND_SPEED = 7;
+/** How far paper gives before it stops a hand: a share of the span, and a little more. */
+const REACH_GIVE = 0.01;
+const REACH_SLACK = 0.005;
 /** Substeps between contact searches. */
 const CONTACT_INTERVAL = 6;
 /**
@@ -77,6 +88,15 @@ const CONTACT_REACH = 0.2;
 const INSIDE_MARGIN = 0.03;
 /** Contact searches a remembered side outlives once the paper has moved apart. */
 const SIDE_MEMORY = 6;
+
+/** The shortest span of paper between two held points, over the layers each one holds. */
+function restGap(a: Float64Array, b: Float64Array): number {
+  let shortest = Infinity;
+  for (let i = 0; i < a.length; i += 2) {
+    for (let j = 0; j < b.length; j += 2) shortest = Math.min(shortest, Math.hypot((a[i] as number) - (b[j] as number), (a[i + 1] as number) - (b[j + 1] as number)));
+  }
+  return shortest;
+}
 
 export class SoftSheet {
   readonly x: Float64Array;
@@ -103,6 +123,13 @@ export class SoftSheet {
   private readonly centre: Float64Array;
 
   private readonly contactCell: number;
+  private readonly reachPoint = { x: 0, y: 0, z: 0 };
+
+  /** Points of locked paper, which bound how far any hand can carry the paper it holds. */
+  private readonly anchors: Int32Array;
+  /** Where each anchor's layers sat on the unfolded sheet: x z pairs, from `anchorStart`. */
+  private readonly anchorRest: Float64Array;
+  private readonly anchorStart: Int32Array;
 
   private solid: Float64Array | null = null;
   private readonly orientation: Quat = [0, 0, 0, 1];
@@ -134,6 +161,33 @@ export class SoftSheet {
     if (initial) this.x.set(initial);
 
     this.contactCell = Math.max(...mesh.edgeLength) * 1.1;
+
+    // Locked paper does not move. Each of its points is reached through every layer meeting there.
+    const anchorOf = new Int32Array(n).fill(-1);
+    const anchors: number[] = [];
+    for (let i = 0; i < n; i++) {
+      if (this.w[i] !== 0) continue;
+      anchorOf[i] = anchors.length;
+      anchors.push(i);
+    }
+    this.anchors = Int32Array.from(anchors);
+    this.anchorStart = new Int32Array(anchors.length + 1);
+    const { cornerVertex, cornerRest } = mesh;
+    for (let c = 0; c < cornerVertex.length; c++) {
+      const a = anchorOf[cornerVertex[c] as number] ?? -1;
+      if (a >= 0) this.anchorStart[a + 1] = (this.anchorStart[a + 1] as number) + 1;
+    }
+    for (let a = 0; a < anchors.length; a++) this.anchorStart[a + 1] = (this.anchorStart[a + 1] as number) + (this.anchorStart[a] as number);
+    this.anchorRest = new Float64Array((this.anchorStart[anchors.length] as number) * 2);
+    const filled = this.anchorStart.slice(0, anchors.length);
+    for (let c = 0; c < cornerVertex.length; c++) {
+      const a = anchorOf[cornerVertex[c] as number] ?? -1;
+      if (a < 0) continue;
+      const slot = filled[a] as number;
+      filled[a] = slot + 1;
+      this.anchorRest[slot * 2] = cornerRest[c * 2] as number;
+      this.anchorRest[slot * 2 + 1] = cornerRest[c * 2 + 1] as number;
+    }
 
     const hinges = mesh.hinges.length / 4;
     this.hingeRest = new Float64Array(hinges);
@@ -184,7 +238,23 @@ export class SoftSheet {
   }
 
   addPin(tri: number, b0: number, b1: number, b2: number): Pin {
-    const pin: Pin = { tri, b0, b1, b2, x: 0, y: 0, z: 0, heldX: 0, heldY: 0, heldZ: 0 };
+    const rest = this.restAt(tri, b0, b1, b2);
+    const { anchors, anchorRest, anchorStart } = this;
+    const reach = new Float64Array(anchors.length);
+    for (let a = 0; a < anchors.length; a++) {
+      let shortest = Infinity;
+      for (let j = anchorStart[a] as number; j < (anchorStart[a + 1] as number); j++) {
+        const ax = anchorRest[j * 2] as number, az = anchorRest[j * 2 + 1] as number;
+        for (let p = 0; p < rest.length; p += 2) shortest = Math.min(shortest, Math.hypot((rest[p] as number) - ax, (rest[p + 1] as number) - az));
+      }
+      reach[a] = shortest;
+    }
+    const pin: Pin = { tri, b0, b1, b2, x: 0, y: 0, z: 0, heldX: 0, heldY: 0, heldZ: 0, rest, reach, span: new Map(), strain: 0 };
+    for (const other of this.pins) {
+      const gap = restGap(rest, other.rest);
+      pin.span.set(other, gap);
+      other.span.set(pin, gap);
+    }
     this.pinPoint(pin, pin);
     pin.heldX = pin.x;
     pin.heldY = pin.y;
@@ -193,9 +263,31 @@ export class SoftSheet {
     return pin;
   }
 
+  /** Where a point of a triangle sat on the unfolded sheet, once for each of its layers. */
+  private restAt(tri: number, b0: number, b1: number, b2: number): Float64Array {
+    const { faceTri, cornerVertex, cornerRest, tris } = this.mesh;
+    const out: number[] = [];
+    for (let f = 0; f < faceTri.length; f++) {
+      if (faceTri[f] !== tri) continue;
+      let x = 0, z = 0;
+      for (let k = 0; k < 3; k++) {
+        const v = tris[tri * 3 + k] as number;
+        const weight = k === 0 ? b0 : k === 1 ? b1 : b2;
+        for (let c = 0; c < 3; c++) {
+          if (cornerVertex[f * 3 + c] !== v) continue;
+          x += weight * (cornerRest[(f * 3 + c) * 2] as number);
+          z += weight * (cornerRest[(f * 3 + c) * 2 + 1] as number);
+        }
+      }
+      out.push(x, z);
+    }
+    return Float64Array.from(out);
+  }
+
   removePin(pin: Pin): void {
     const i = this.pins.indexOf(pin);
     if (i >= 0) this.pins.splice(i, 1);
+    for (const other of this.pins) other.span.delete(pin);
   }
 
   /** Where a pinned point of the paper actually is right now. */
@@ -285,14 +377,51 @@ export class SoftSheet {
 
   private moveHands(h: number): void {
     const reach = HAND_SPEED * h;
+    const point = this.reachPoint;
     for (const pin of this.pins) {
       const dx = pin.x - pin.heldX, dy = pin.y - pin.heldY, dz = pin.z - pin.heldZ;
       const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (distance === 0) continue;
       const k = distance > reach ? reach / distance : 1;
-      pin.heldX += dx * k;
-      pin.heldY += dy * k;
-      pin.heldZ += dz * k;
+      point.x = pin.heldX + dx * k;
+      point.y = pin.heldY + dy * k;
+      point.z = pin.heldZ + dz * k;
+      this.keepInReach(pin, point);
+      pin.heldX = point.x;
+      pin.heldY = point.y;
+      pin.heldZ = point.z;
+      // How far past its reach the hand is aiming, for whoever draws it straining.
+      point.x = pin.x;
+      point.y = pin.y;
+      point.z = pin.z;
+      this.keepInReach(pin, point);
+      pin.strain = Math.hypot(pin.x - point.x, pin.y - point.y, pin.z - point.z);
     }
+  }
+
+  /**
+   * Paper does not stretch, so a hand can carry it only as far as it reaches from
+   * whatever else holds it: locked paper, or another hand. Pulling further, the paper
+   * stops the hand instead of tearing. Reach is measured on the unfolded sheet, layer
+   * by layer, which is as far as paper can ever span.
+   */
+  private keepInReach(pin: Pin, point: { x: number; y: number; z: number }): void {
+    const { x, anchors } = this;
+    const { reach } = pin;
+    const ball = (cx: number, cy: number, cz: number, radius: number) => {
+      const dx = point.x - cx, dy = point.y - cy, dz = point.z - cz;
+      const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (distance <= radius) return;
+      const s = radius / distance;
+      point.x = cx + dx * s;
+      point.y = cy + dy * s;
+      point.z = cz + dz * s;
+    };
+    for (let i = 0; i < anchors.length; i++) {
+      const v = (anchors[i] as number) * 3;
+      ball(x[v] as number, x[v + 1] as number, x[v + 2] as number, (reach[i] as number) * (1 + REACH_GIVE) + REACH_SLACK);
+    }
+    for (const [other, gap] of pin.span) ball(other.heldX, other.heldY, other.heldZ, gap * (1 + REACH_GIVE) + REACH_SLACK);
   }
 
   private solvePins(): void {
@@ -370,6 +499,8 @@ export class SoftSheet {
       const wa = w[ia] as number, wb = w[ib] as number, wc = w[ic] as number, wd = w[id] as number;
       const weight = wa * (gax * gax + gay * gay + gaz * gaz) + wb * (gbx * gbx + gby * gby + gbz * gbz)
         + wc * (gcx * gcx + gcy * gcy + gcz * gcz) + wd * (gdx * gdx + gdy * gdy + gdz * gdz);
+      // All four points held: nothing here can move, and a stop dead would divide by nothing.
+      if (weight === 0) continue;
       // Past the bend limit the edge stops dead, instead of springing softly.
       const bend = angle - (this.hingeRest[n] as number);
       const overLimit = !hingeFolded[n] && Math.abs(bend) > BEND_LIMIT;

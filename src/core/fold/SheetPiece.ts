@@ -1,6 +1,6 @@
 import type { SheetDefinition } from '../asset/sheetTypes';
 import { FoldBook } from './FoldBook';
-import type { FoldPlan, FoldRequest } from './FoldBook';
+import type { FoldFailure, FoldPlan, FoldRequest } from './FoldBook';
 import { applyOpen } from './recipes';
 import type { OpenStep } from './recipes';
 import type { ReshapeFailure } from './reshape';
@@ -14,6 +14,14 @@ import { buildSoftMesh, metresPerUnit } from './soft/softMesh';
 import { CONTACT_GAP, SoftSheet } from './soft/SoftSheet';
 import type { SoftSettings } from './soft/SoftSheet';
 
+/** Why a fold cannot be made: one of the Book's reasons, or paper that is locked. */
+export type FoldRefusal = FoldFailure | 'held';
+
+/** A fold as this piece would make it. The Book may allow a fold that locked paper refuses. */
+export interface PiecePlan extends Omit<FoldPlan, 'failure'> {
+  failure: FoldRefusal | null;
+}
+
 /**
  * One connected piece of paper: the exact Book plus the floppy cloth built from
  * it, kept in step. Everything that changes the paper goes through here. No
@@ -21,6 +29,12 @@ import type { SoftSettings } from './soft/SoftSheet';
  */
 export class SheetPiece {
   soft: SoftSheet;
+  /**
+   * Locked paper, as if held under a hand: it stays still and pressed flat, and
+   * nothing moves it until it is unlocked. Loose paper lying on it is held with it,
+   * until a hand lifts it off as a flap.
+   */
+  private holds: Set<number>;
   /** Paper lifted off its stacks right now. */
   private flaps: ReadonlySet<number>[] = [];
   /** The line each flap is being folded along, if a fold is lined up for it. */
@@ -40,8 +54,10 @@ export class SheetPiece {
     public book: FoldBook = FoldBook.sheet(definition.cells),
     private settings: Partial<SoftSettings> = {},
     initial?: Float64Array,
+    held: Iterable<number> = [],
   ) {
-    this.soft = new SoftSheet(buildSoftMesh(book, definition.size), this.solverSettings(), initial);
+    this.holds = new Set(held);
+    this.soft = new SoftSheet(buildSoftMesh(book, definition.size, [], [], this.holds), this.solverSettings(), initial);
   }
 
   private solverSettings(): Partial<SoftSettings> {
@@ -90,19 +106,129 @@ export class SheetPiece {
   /** Replaces the cloth. Pins hold triangles that no longer exist, so their owners must re-grip. */
   private rebuild(positions: (mesh: ReturnType<typeof buildSoftMesh>) => Float64Array): void {
     if (this.bends.length !== this.flaps.length) this.bends = this.flaps.map(() => null);
-    const mesh = buildSoftMesh(this.book, this.definition.size, this.flaps, this.bends);
+    // A finished craft is stiff plates, and nothing on it is held.
+    const mesh = buildSoftMesh(this.book, this.definition.size, this.flaps, this.bends, this.finished ? undefined : this.holds);
     this.soft = new SoftSheet(mesh, this.solverSettings(), positions(mesh));
     this.revision++;
   }
 
-  /** Commits a fold. Refused folds change nothing and report why. */
-  fold(request: FoldRequest, swing = false): FoldPlan {
+  /** What a fold would do. It is refused if it would move locked paper. */
+  plan(request: FoldRequest): PiecePlan {
     const plan = this.book.plan(request);
+    if (!plan.failure && [...plan.moved].some((f) => this.holds.has(f))) return { ...plan, failure: 'held' };
+    return plan;
+  }
+
+  /** Paper that is locked right now. */
+  get held(): ReadonlySet<number> {
+    return this.holds;
+  }
+
+  /**
+   * Locks paper, or unlocks it. Locking presses paper flat onto the table where it
+   * lies, as a hand does, and paper lifted in a hand drops back onto its stack.
+   * Returns the faces that changed.
+   */
+  lock(faces: Iterable<number>, locked: boolean): Set<number> {
+    const changed = new Set<number>();
+    for (const f of faces) {
+      if (locked === this.holds.has(f)) continue;
+      if (locked) this.holds.add(f);
+      else this.holds.delete(f);
+      changed.add(f);
+    }
+    if (changed.size === 0) return changed;
+    if (locked) {
+      const kept = this.flaps.map((flap) => new Set([...flap].filter((f) => !this.holds.has(f))));
+      this.bends = this.bends.filter((_, i) => (kept[i] as Set<number>).size > 0);
+      this.flaps = kept.filter((flap) => flap.size > 0);
+    }
+    const before = this.corners();
+    const table = locked ? this.tableFrame(this.lifted) : null;
+    this.rebuild((mesh) => {
+      // Every point stays where it is. Points that now weld meet halfway.
+      const out = new Float64Array(mesh.vertexCount * 3);
+      const count = new Float64Array(mesh.vertexCount);
+      for (const f of this.book.faces) {
+        for (let k = 0; k < 3; k++) {
+          const v = mesh.cornerVertex[f * 3 + k] as number;
+          for (let i = 0; i < 3; i++) out[v * 3 + i] = (out[v * 3 + i] as number) + (before[f * 9 + k * 3 + i] as number);
+          count[v] = (count[v] as number) + 1;
+        }
+      }
+      for (let v = 0; v < mesh.vertexCount; v++) for (let i = 0; i < 3; i++) out[v * 3 + i] = (out[v * 3 + i] as number) / ((count[v] as number) || 1);
+      if (table) this.pressFlat(mesh, out, changed, table);
+      return out;
+    });
+    return changed;
+  }
+
+  /**
+   * The paper's flat frame, turned level and set down on the table: where pressing
+   * paper flat puts it. Paper locked while it hung in the air would stay there.
+   */
+  private tableFrame(excluded: ReadonlySet<number>): (x: number, z: number, out: Float64Array) => void {
+    const frame = this.frameOf(excluded);
+    const origin = new Float64Array(3), ax = new Float64Array(3), az = new Float64Array(3);
+    frame(0, 0, origin);
+    frame(1, 0, ax);
+    frame(0, 1, az);
+    let xx = (ax[0] as number) - (origin[0] as number), xz = (ax[2] as number) - (origin[2] as number);
+    const xLength = Math.hypot(xx, xz);
+    if (xLength < 1e-6) [xx, xz] = [1, 0];
+    else [xx, xz] = [xx / xLength, xz / xLength];
+    // The flat sheet's other axis, square to the first, and keeping the side it was on.
+    let zx = (az[0] as number) - (origin[0] as number), zz = (az[2] as number) - (origin[2] as number);
+    const along = zx * xx + zz * xz;
+    zx -= along * xx;
+    zz -= along * xz;
+    const zLength = Math.hypot(zx, zz);
+    if (zLength < 1e-6) [zx, zz] = [-xz, xx];
+    else [zx, zz] = [zx / zLength, zz / zLength];
+    const ox = origin[0] as number, oz = origin[2] as number;
+    return (px, pz, out) => {
+      out[0] = ox + xx * px + zx * pz;
+      out[1] = 0;
+      out[2] = oz + xz * px + zz * pz;
+    };
+  }
+
+  /** Lays some faces flat on the table, each corner at the height its layers rest at. */
+  private pressFlat(mesh: ReturnType<typeof buildSoftMesh>, out: Float64Array, faces: ReadonlySet<number>, table: (x: number, z: number, out: Float64Array) => void): void {
+    const point = new Float64Array(3);
+    for (const f of faces) {
+      for (let k = 0; k < 3; k++) {
+        const v = mesh.cornerVertex[f * 3 + k] as number;
+        table(mesh.flat[v * 2] as number, mesh.flat[v * 2 + 1] as number, point);
+        out[v * 3] = point[0] as number;
+        out[v * 3 + 1] = (mesh.vertexDepth[v] as number) * this.definition.thickness;
+        out[v * 3 + 2] = point[2] as number;
+      }
+    }
+  }
+
+  /**
+   * Commits a fold. Refused folds change nothing and report why. A pressed fold
+   * locks what it moved together with the layers it came to lie on: the fold is
+   * then a joint with the paper underneath, as if creased and held under a hand.
+   */
+  fold(request: FoldRequest, swing = false, press = false): PiecePlan {
+    const plan = this.plan(request);
     if (plan.failure) return plan;
     const before = this.corners();
     const frame = this.frameOf(plan.moved);
+    const table = press ? this.tableFrame(plan.moved) : null;
 
     this.book.fold(request);
+    const pressed = new Set<number>();
+    if (press) {
+      for (const f of plan.moved) {
+        for (const g of this.book.stackOf(f)) {
+          if (!this.holds.has(g)) pressed.add(g);
+          this.holds.add(g);
+        }
+      }
+    }
     this.flaps = [];
     this.bends = [];
     this.previousCorners = before;
@@ -135,6 +261,7 @@ export class SheetPiece {
           out.set(landing, v * 3);
         }
       }
+      if (table) this.pressFlat(mesh, out, pressed, table);
       return out;
     });
     return plan;
@@ -145,6 +272,8 @@ export class SheetPiece {
     const frame = this.frameOf(new Set());
     const failure = applyOpen(this.book, this.definition.size, step);
     if (failure) return failure;
+    // The whole piece is laid out afresh, so nothing stays held where it was.
+    this.holds.clear();
     this.flaps = [];
     this.bends = [];
     this.rebuild((mesh) => {
@@ -213,8 +342,20 @@ export class SheetPiece {
     };
   }
 
+  /** Faces whose middles lie within a radius of a flat point, in metres. */
+  facesWithin(x: number, z: number, radius: number): number[] {
+    const { at } = this.book;
+    const reach = radius / this.unit;
+    const ux = this.toUnits(x), uz = this.toUnits(z);
+    return this.book.faces.filter((f) => {
+      const cx = ((at[f * 6] as number) + (at[f * 6 + 2] as number) + (at[f * 6 + 4] as number)) / 3;
+      const cz = ((at[f * 6 + 1] as number) + (at[f * 6 + 3] as number) + (at[f * 6 + 5] as number)) / 3;
+      return Math.hypot(cx - ux, cz - uz) <= reach;
+    });
+  }
+
   /** Flat paper connected to a face, stopping at every crease. */
-  private flatRegion(face: number): Set<number> {
+  flatRegion(face: number): Set<number> {
     const { book } = this;
     const region = new Set([face]);
     const todo = [face];
@@ -356,14 +497,14 @@ export class SheetPiece {
    * shows: it bends away from under the layer holding it, and from its creases.
    */
   private showing(face: number, under: boolean): Set<number> {
-    const { book, lifted } = this;
+    const { book, lifted, holds } = this;
     const outermost = (f: number) => {
       const stack = book.stackOf(f);
       const at = stack.indexOf(f);
       return !(under ? stack.slice(0, at) : stack.slice(at + 1)).some((g) => !lifted.has(g));
     };
     const shown = new Set<number>();
-    if (lifted.has(face) || !outermost(face)) return shown;
+    if (lifted.has(face) || holds.has(face) || !outermost(face)) return shown;
     const flat = this.flatRegion(face);
     shown.add(face);
     const todo = [face];
@@ -371,7 +512,7 @@ export class SheetPiece {
       const f = todo.pop() as number;
       for (let k = 0; k < 3; k++) {
         const g = book.neighbour[f * 3 + k] as number;
-        if (g < 0 || shown.has(g) || !flat.has(g) || book.edgeBlocked(f, k) || lifted.has(g) || !outermost(g)) continue;
+        if (g < 0 || shown.has(g) || !flat.has(g) || book.edgeBlocked(f, k) || lifted.has(g) || holds.has(g) || !outermost(g)) continue;
         shown.add(g);
         todo.push(g);
       }
@@ -386,11 +527,47 @@ export class SheetPiece {
    */
   flapToLift(face: number, under = false): Set<number> | null {
     const { book, lifted } = this;
+    if (this.holds.has(face)) return null;
     const stacked = (paper: ReadonlySet<number>) => [...paper].some((f) => book.depth(f) > 1);
-    const flap = this.flapOf(face, under);
+    const flap = this.loose(this.flapOf(face, under), face);
     if (flap.size < book.faces.length && !this.heldDown(flap, under) && ![...flap].some((f) => lifted.has(f)) && stacked(flap)) return flap;
     const shown = this.showing(face, under);
     return shown.size > 0 && shown.size < book.faces.length && stacked(shown) ? shown : null;
+  }
+
+  /** The unlocked part of some paper that a face can reach without crossing locked paper. */
+  private loose(paper: ReadonlySet<number>, face: number): Set<number> {
+    const { book, holds } = this;
+    if (![...paper].some((f) => holds.has(f))) return new Set(paper);
+    const part = new Set([face]);
+    const todo = [face];
+    while (todo.length) {
+      const f = todo.pop() as number;
+      for (let k = 0; k < 3; k++) {
+        const g = book.neighbour[f * 3 + k] as number;
+        if (g < 0 || part.has(g) || !paper.has(g) || holds.has(g) || book.edgeBlocked(f, k)) continue;
+        part.add(g);
+        todo.push(g);
+      }
+    }
+    return part;
+  }
+
+  /** Where a flat point of a face sat on the sheet before any folding, in metres. */
+  restPoint(face: number, x: number, z: number): { x: number; z: number } {
+    const { at, rest, span } = this.book;
+    const px = this.toUnits(x), pz = this.toUnits(z);
+    const ax = at[face * 6] as number, az = at[face * 6 + 1] as number;
+    const ux = (at[face * 6 + 2] as number) - ax, uz = (at[face * 6 + 3] as number) - az;
+    const vx = (at[face * 6 + 4] as number) - ax, vz = (at[face * 6 + 5] as number) - az;
+    const det = ux * vz - vx * uz || 1;
+    const s = ((px - ax) * vz - vx * (pz - az)) / det, t = (ux * (pz - az) - (px - ax) * uz) / det;
+    const r = (k: number, axis: number) => rest[face * 6 + k * 2 + axis] as number;
+    const unit = this.unit;
+    return {
+      x: (r(0, 0) + s * (r(1, 0) - r(0, 0)) + t * (r(2, 0) - r(0, 0)) - span / 2) * unit,
+      z: (r(0, 1) + s * (r(1, 1) - r(0, 1)) + t * (r(2, 1) - r(0, 1)) - span / 2) * unit,
+    };
   }
 
   /** The way the paper's top faces in the world, read from the paper that is not lifted. */
@@ -421,6 +598,8 @@ export class SheetPiece {
         const k0 = flap.has(f) ? lift : 0;
         for (let k = 0; k < 3; k++) {
           const v = mesh.cornerVertex[f * 3 + k] as number;
+          // A crease on locked paper stays down: only the flap's free points lift.
+          if (mesh.inverseMass[v] === 0 && k0 !== 0) continue;
           out[v * 3] = (before[f * 9 + k * 3] as number) + nx * k0;
           out[v * 3 + 1] = (before[f * 9 + k * 3 + 1] as number) + ny * k0;
           out[v * 3 + 2] = (before[f * 9 + k * 3 + 2] as number) + nz * k0;
@@ -702,9 +881,11 @@ export class SheetPiece {
     this.flaps = [];
     this.bends = [];
     const books = this.book.cutAlong(line, from, to);
+    const heldIn = (book: FoldBook) => book.faces.filter((f) => this.holds.has(f));
     const pieces = books.map((book) => {
       if (book === this.book) return this;
-      const mesh = buildSoftMesh(book, this.definition.size);
+      const held = heldIn(book);
+      const mesh = buildSoftMesh(book, this.definition.size, [], [], new Set(held));
       const initial = new Float64Array(mesh.vertexCount * 3);
       for (const f of book.faces) {
         for (let k = 0; k < 3; k++) {
@@ -714,8 +895,9 @@ export class SheetPiece {
           initial[v * 3 + 2] = before[f * 9 + k * 3 + 2] as number;
         }
       }
-      return new SheetPiece(this.definition, book, this.settings, initial);
+      return new SheetPiece(this.definition, book, this.settings, initial, held);
     });
+    this.holds = new Set(heldIn(this.book));
     if (books.length === 1 && books[0] === this.book) {
       this.rebuild((mesh) => {
         const out = new Float64Array(mesh.vertexCount * 3);

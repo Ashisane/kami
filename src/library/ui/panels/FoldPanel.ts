@@ -17,6 +17,12 @@ const PAPERS = [
 const TOOLS = [
   { value: 'fold', label: 'Fold', title: 'Pull paper and drop the pin to fold' },
   { value: 'cut', label: 'Cut', title: 'Draw along a line to cut every layer (X)' },
+  { value: 'lock', label: 'Lock', title: 'Click a flap to lock or free it, or drag to paint' },
+] as const;
+
+const FOLD_LOCKS = [
+  { value: 'locked', label: 'Folds lock', title: 'A new fold is held down with the paper it lands on' },
+  { value: 'loose', label: 'Folds stay loose', title: 'A new fold can be lifted straight away' },
 ] as const;
 
 const stat = (label: string, value: string | number) => h('div.stat', {}, h('dt', {}, label), h('dd', {}, value));
@@ -36,6 +42,13 @@ function readoutPanel(lab: FoldLab, body: HTMLElement): void {
     ),
     h('p.panel-note', {}, `${r.simulationMs.toFixed(1)} ms sim · ${r.triangles.toLocaleString()} tris · ${(r.stretch * 100).toFixed(1)}% stretch`),
   );
+}
+
+/** How much of the paper is locked down. */
+function lockNote(lab: FoldLab, body: HTMLElement): void {
+  const { lockedFaces, faces } = lab.readout();
+  const share = faces > 0 ? Math.round((lockedFaces / faces) * 100) : 0;
+  replace(body, h('p.panel-note', {}, lockedFaces === 0 ? 'Nothing is locked: all of it moves when pulled.' : `${share}% of the paper is locked and stays put.`));
 }
 
 /** What a finished craft can do: one row for each joint, or for each mirrored pair. */
@@ -87,11 +100,13 @@ export function foldPanel({ stage }: LibraryContext): HTMLElement {
   const body = h('div');
   const steps = h('div.recipe');
   const craft = h('div');
+  const locks = h('div');
   const finish = h('button.btn', { type: 'button', title: 'Enter', onclick: () => (lab.readout().completed ? lab.backToFolding() : lab.complete()) }, 'Complete');
   const refresh = () => {
     readoutPanel(lab, body);
     recipePanel(lab, steps);
     craftPanel(lab, craft);
+    lockNote(lab, locks);
     finish.textContent = lab.readout().completed ? 'Back to folding' : 'Complete';
   };
   refresh();
@@ -119,6 +134,20 @@ export function foldPanel({ stage }: LibraryContext): HTMLElement {
         h('li', {}, h('strong', {}, 'Wheel'), h('span', {}, 'raise or lower while dragging')),
         h('li', {}, h('strong', {}, 'Shift'), h('span', {}, 'grip every layer at that point')),
         h('li', {}, h('strong', {}, 'Ctrl'), h('span', {}, 'reach the underside, for the flap below')),
+      ),
+    ),
+    section(
+      'Locking',
+      segmented(FOLD_LOCKS, lab.readout().lockFolds ? 'locked' : 'loose', (value) => lab.setLockFolds(value === 'locked')).element,
+      locks,
+      h('div.button-row', {}, button('Lock all', () => lab.lockAll(true), { title: 'Hold all of it still' }), button('Unlock all', () => lab.lockAll(false), { title: 'U' })),
+      h(
+        'ul.rows.lab-hints',
+        {},
+        h('li', {}, h('strong', {}, 'L'), h('span', {}, 'lock or free the flap under the pointer')),
+        h('li', {}, h('strong', {}, 'Lock tool'), h('span', {}, 'click a flap, or drag to paint part of one')),
+        h('li', {}, h('strong', {}, 'Shift'), h('span', {}, 'every layer at that point')),
+        h('li', {}, h('strong', {}, 'Locked paper'), h('span', {}, 'stays put, and a pull cannot tear it')),
       ),
     ),
     section(

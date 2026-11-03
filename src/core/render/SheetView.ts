@@ -17,6 +17,18 @@ const ROUNDING = 0.75;
 
 const PATCH_POINTS = ((DETAIL + 1) * (DETAIL + 2)) / 2;
 
+/**
+ * Marks drawn over the top of locked paper, in a material the caller provides. The
+ * material reads `paperUv`, where a point sat on the unfolded sheet, and `markStamp`.
+ */
+export interface SheetMarks {
+  readonly material: Material;
+  /** Goes up whenever a stamp changes, so views draw their marks again. */
+  readonly revision: number;
+  /** When a face was marked, in seconds, and the point on the unfolded sheet it was pressed from. */
+  stamp(face: number): readonly [number, number, number];
+}
+
 /** Index of a patch point, from how many steps it sits along two of the corners. */
 const patchIndex = (a: number, b: number): number => {
   const row = DETAIL - a;
@@ -36,6 +48,7 @@ export class SheetView {
   private readonly materials: Material[];
   private mesh: Mesh | null = null;
   private revision = -1;
+  private marksRevision = -1;
   private hiddenKey = '';
 
   // One patch of curved surface per solver triangle.
@@ -55,17 +68,23 @@ export class SheetView {
   private positions = new BufferAttribute(new Float32Array(0), 3);
   private normals = new BufferAttribute(new Float32Array(0), 3);
 
-  constructor(readonly piece: SheetPiece) {
+  constructor(
+    readonly piece: SheetPiece,
+    private readonly marks: SheetMarks | null = null,
+  ) {
     const { top, bottom, edge } = piece.definition;
     this.materials = [paper(top, { sheet: true }), paper(bottom, { sheet: true }), paper(edge, { sheet: true })];
+    if (marks) this.materials.push(marks.material);
   }
 
   /** Draws the piece, leaving out `hidden` faces while they swing as a separate flap. */
   update(hidden: ReadonlySet<number> = NOTHING): void {
     const key = hidden.size === 0 ? '' : `${hidden.size}:${[...hidden][0]}`;
-    if (this.revision !== this.piece.revision || key !== this.hiddenKey) this.build(hidden);
+    const marked = this.marks?.revision ?? 0;
+    if (this.revision !== this.piece.revision || key !== this.hiddenKey || marked !== this.marksRevision) this.build(hidden);
     this.hiddenKey = key;
     this.revision = this.piece.revision;
+    this.marksRevision = marked;
     this.computePatches();
     this.writeVertices();
   }
@@ -210,7 +229,10 @@ export class SheetView {
     const height: number[] = [];
     const flip: number[] = [];
     const uv: number[] = [];
-    const indices: number[][] = [[], [], []];
+    const stamps: number[] = [];
+    const indices: number[][] = [[], [], [], []];
+    const { marks } = this;
+    const { held } = piece;
 
     /** Which book corner of a face sits on each solver corner. */
     const cornersOn = (f: number, t: number): [number, number, number] => {
@@ -236,6 +258,8 @@ export class SheetView {
       const [h0, h1, h2] = heightsOn(f, t);
       const skin = up ? thickness / 2 : -thickness / 2;
       const rest = (c: number, axis: number) => ((book.rest[f * 6 + c * 2 + axis] as number) - book.span / 2) * unit;
+      // Locked paper is marked where its top shows.
+      const stamp = marks && up && held.has(f) ? marks.stamp(f) : NO_STAMP;
       for (let a = DETAIL; a >= 0; a--) {
         const row = DETAIL - a;
         for (let b = 0; b <= row; b++) {
@@ -244,13 +268,16 @@ export class SheetView {
           height.push(w0 * h0 + w1 * h1 + w2 * h2 + skin);
           flip.push(up ? 1 : -1);
           uv.push(w0 * rest(c0, 0) + w1 * rest(c1, 0) + w2 * rest(c2, 0), w0 * rest(c0, 1) + w1 * rest(c1, 1) + w2 * rest(c2, 1));
+          stamps.push(stamp[0], stamp[1], stamp[2]);
         }
       }
       const list = indices[slot] as number[];
+      const mark = stamp === NO_STAMP ? null : (indices[3] as number[]);
       for (let i = 0; i < PATCH_TRIANGLES.length; i += 3) {
         const p = first + (PATCH_TRIANGLES[i] as number), q = first + (PATCH_TRIANGLES[i + 1] as number), r = first + (PATCH_TRIANGLES[i + 2] as number);
         if (up) list.push(p, q, r);
         else list.push(p, r, q);
+        mark?.push(p, q, r);
       }
     };
 
@@ -289,6 +316,7 @@ export class SheetView {
         flip.push(1, 1, 1, 1);
         const u = (book.rest[f * 6] as number) * unit, w = (book.rest[f * 6 + 1] as number) * unit;
         uv.push(u, low0 * 8 + w, u + 0.25, low1 * 8 + w, u + 0.25, high1 * 8 + w, u, high0 * 8 + w);
+        for (let k = 0; k < 4; k++) stamps.push(NO_STAMP[0], NO_STAMP[1], NO_STAMP[2]);
         if (sense > 0) (indices[slot] as number[]).push(first, first + 1, first + 2, first, first + 2, first + 3);
         else (indices[slot] as number[]).push(first, first + 2, first + 1, first, first + 3, first + 2);
         rims.push(a, b, sense);
@@ -359,10 +387,12 @@ export class SheetView {
     geometry.setAttribute('position', this.positions);
     geometry.setAttribute('normal', this.normals);
     geometry.setAttribute('paperUv', new BufferAttribute(Float32Array.from(uv), 2));
+    if (marks) geometry.setAttribute('markStamp', new BufferAttribute(Float32Array.from(stamps), 3));
 
     const all = new Uint32Array(indices.reduce((sum, list) => sum + list.length, 0));
     let offset = 0;
     indices.forEach((list, slot) => {
+      if (list.length === 0) return;
       geometry.addGroup(offset, list.length, slot);
       all.set(list, offset);
       offset += list.length;
@@ -398,6 +428,7 @@ export class SheetView {
 }
 
 const NOTHING: ReadonlySet<number> = new Set();
+const NO_STAMP = [0, 0, 0] as const;
 
 /** A stretch of rim up the side of a stack, not yet drawn. */
 interface RimPiece {

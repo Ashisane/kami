@@ -369,6 +369,167 @@ describe('folded paper in the solver', () => {
   });
 });
 
+describe('locked paper', () => {
+  /** A sheet folded in half, its top layer's free edge along x = 0, with the layer under it locked. */
+  const halfWithBaseLocked = () => {
+    const piece = new SheetPiece(sheet);
+    foldAll(piece, line('x', 5), 1);
+    const { book } = piece;
+    piece.lock(book.faces.filter((f) => book.flipped[f] === 0), true);
+    run(piece, 20);
+    return piece;
+  };
+  /** The highest any of these faces rises, and the furthest they slide, since `before`. */
+  const motion = (piece: SheetPiece, faces: readonly number[], before: Float64Array) => {
+    const now = piece.corners();
+    let rose = 0, slid = 0;
+    for (const f of faces) {
+      for (let k = 0; k < 3; k++) {
+        const o = f * 9 + k * 3;
+        rose = Math.max(rose, now[o + 1] as number);
+        slid = Math.max(slid, Math.hypot((now[o] as number) - (before[o] as number), (now[o + 2] as number) - (before[o + 2] as number)));
+      }
+    }
+    return { rose, slid };
+  };
+
+  it('keeps locked paper still with whatever lies on it, until a layer is lifted off', () => {
+    const piece = halfWithBaseLocked();
+    const held = (p: SheetPiece) => p.soft.mesh.triHeld.reduce((sum, h) => sum + h, 0);
+    // The loose top layer lies pressed under the same hand.
+    expect(piece.soft.mesh.triCount).toBe(400);
+    expect(held(piece)).toBe(400);
+    expect(piece.soft.mesh.inverseMass.every((w) => w === 0)).toBe(true);
+    const top = piece.book.faces.find((f) => piece.book.flipped[f] === 1) as number;
+    expect(piece.peel(top)).toBe(true);
+    const { mesh } = piece.soft;
+    expect(mesh.triCount).toBe(800);
+    expect(held(piece)).toBe(400);
+    // The lifted layer moves everywhere except along the crease it shares with locked paper.
+    const free = new Set<number>(), still = new Set<number>();
+    for (let t = 0; t < mesh.triCount; t++) {
+      if (mesh.triHeld[t]) continue;
+      for (let k = 0; k < 3; k++) {
+        const v = mesh.tris[t * 3 + k] as number;
+        (mesh.inverseMass[v] === 0 ? still : free).add(v);
+      }
+    }
+    expect(still.size).toBe(21);
+    expect(free.size).toBeGreaterThan(200);
+  });
+
+  it('lifts the top layer alone when the layer under it is locked', () => {
+    const piece = halfWithBaseLocked();
+    const { book } = piece;
+    const base = book.faces.filter((f) => book.flipped[f] === 0);
+    const edge = book.faces.find((f) => book.flipped[f] === 1 && (book.at[f * 6] as number) <= 1 && Math.abs((book.at[f * 6 + 1] as number) - m(5)) <= m(0.5)) as number;
+    // Pulled by its free edge, with no fold lined up: the crease wants it shut, and nothing else holds the base.
+    expect(piece.peel(edge)).toBe(true);
+    const before = piece.corners();
+    const { soft } = piece;
+    const hand = soft.addPin(soft.mesh.faceTri[edge] as number, 1 / 3, 1 / 3, 1 / 3);
+    for (let i = 0; i < 90; i++) {
+      hand.y = Math.min(2.5, hand.y + 0.04);
+      hand.x += 0.02;
+      piece.step(DT);
+    }
+    const { rose, slid } = motion(piece, base, before);
+    console.log('locked layer under a pulled top layer rises', rose.toFixed(3), 'm and slides', slid.toFixed(3), 'm; the top layer reaches', heights(piece).top.toFixed(2), 'm');
+    expect(rose).toBeLessThan(0.05);
+    expect(slid).toBeLessThan(0.001);
+    expect(heights(piece).top).toBeGreaterThan(2);
+    expect(piece.soft.stretch()).toBeLessThan(0.03);
+  });
+
+  it('presses paper flat on the table when it is locked mid-air, and the solver stays sound', () => {
+    const piece = new SheetPiece(sheet);
+    const { soft } = piece;
+    // Lift a corner well up, then lock the paper around it while it hangs there.
+    let corner = 0, best = Infinity;
+    for (let t = 0; t < soft.mesh.triCount; t++) {
+      const v = (soft.mesh.tris[t * 3] as number) * 2;
+      const d = Math.hypot((soft.mesh.flat[v] as number) + 5, (soft.mesh.flat[v + 1] as number) + 5);
+      if (d < best) {
+        best = d;
+        corner = t;
+      }
+    }
+    const hand = soft.addPin(corner, 1 / 3, 1 / 3, 1 / 3);
+    for (let i = 0; i < 60; i++) {
+      hand.y = Math.min(2, hand.y + 0.05);
+      piece.step(DT);
+    }
+    expect(heights(piece).top).toBeGreaterThan(1.5);
+    const { book } = piece;
+    const near = book.faces.filter((f) => (book.at[f * 6] as number) < m(3) && (book.at[f * 6 + 1] as number) < m(3));
+    piece.lock(near, true);
+    run(piece, 30);
+    // Locked paper lies on the table, and nothing in the cloth has gone to NaN.
+    const { rose } = motion(piece, near, piece.corners());
+    expect(rose).toBeLessThan(sheet.thickness * 2);
+    expect(piece.soft.x.every((value) => Number.isFinite(value))).toBe(true);
+  });
+
+  it('refuses a fold that would move locked paper', () => {
+    const piece = halfWithBaseLocked();
+    expect(piece.plan({ line: line('z', 5), side: 1, seeds: piece.book.faces }).failure).toBe('held');
+    expect(piece.fold({ line: line('z', 5), side: 1, seeds: piece.book.faces }).failure).toBe('held');
+    expect(piece.book.tallest).toBe(2);
+  });
+
+  it('locks a pressed fold to the layers it lands on', () => {
+    const piece = new SheetPiece(sheet);
+    const plan = piece.fold({ line: line('x', 5), side: 1, seeds: piece.book.faces }, false, true);
+    expect(plan.failure).toBeNull();
+    // Folded in half, everything the flap moved and everything it now lies on.
+    expect(piece.held.size).toBe(800);
+    piece.lock(piece.book.faces, false);
+    expect(piece.held.size).toBe(0);
+    expect(piece.soft.mesh.triHeld.every((h) => h === 0)).toBe(true);
+    expect(piece.soft.mesh.triCount).toBe(400);
+  });
+
+  it('stops a hand that pulls paper further than it reaches, instead of tearing it', () => {
+    const piece = new SheetPiece(sheet);
+    const { book } = piece;
+    piece.lock(book.faces.filter((f) => (book.at[f * 6] as number) >= m(5) && (book.at[f * 6 + 2] as number) >= m(5) && (book.at[f * 6 + 4] as number) >= m(5)), true);
+    const { soft } = piece;
+    let near = 0, best = Infinity;
+    for (let t = 0; t < soft.mesh.triCount; t++) {
+      const v = (soft.mesh.tris[t * 3] as number) * 2;
+      const d = Math.hypot((soft.mesh.flat[v] as number) + 1, soft.mesh.flat[v + 1] as number);
+      if (!soft.mesh.triHeld[t] && d < best) {
+        best = d;
+        near = t;
+      }
+    }
+    const hand = soft.addPin(near, 1 / 3, 1 / 3, 1 / 3);
+    // Two metres from the locked half, dragged twelve metres away.
+    for (let i = 0; i < 120; i++) {
+      hand.x -= 0.1;
+      hand.y = 1;
+      piece.step(DT);
+    }
+    const paper = { x: 0, y: 0, z: 0 };
+    soft.pinPoint(hand, paper);
+    const ahead = Math.hypot(hand.heldX - paper.x, hand.heldY - paper.y, hand.heldZ - paper.z);
+    console.log('hand dragged 12 m from locked paper: stretch', (soft.stretch() * 100).toFixed(1), '%, hand ahead of its paper by', ahead.toFixed(2), 'm');
+    expect(soft.stretch()).toBeLessThan(0.05);
+    expect(ahead).toBeLessThan(0.1);
+  });
+
+  it('keeps its locks when cut, each piece with its own', () => {
+    const piece = new SheetPiece(sheet);
+    const { book } = piece;
+    piece.lock(book.faces.filter((f) => (book.at[f * 6 + 1] as number) < m(2)), true);
+    const pieces = piece.cut(line('x', 5), 0, m(10));
+    expect(pieces).toHaveLength(2);
+    const total = pieces.reduce((sum, p) => sum + p.held.size, 0);
+    expect(total).toBe(160);
+    for (const p of pieces) expect(p.soft.mesh.triHeld.reduce((sum, h) => sum + h, 0)).toBe(p.held.size);
+  });
+});
+
 describe('hardening', () => {
   it('holds its shape as one solid body when dropped', () => {
     const piece = new SheetPiece(sheet);

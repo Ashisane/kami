@@ -10,7 +10,7 @@ What they build, they mark complete, then use. This is the core of the game.
 | Is | Exact truth | Floppy cloth |
 | Code | `src/core/fold/FoldBook.ts` | `src/core/fold/soft/` |
 | Numbers | Whole numbers, no physics | XPBD particles |
-| Owns | Faces, folds, layer order, legality, cuts | Motion, drape, pins, ground |
+| Owns | Faces, folds, layer order, legality, cuts | Motion, drape, pins, locks, ground |
 | Rebuilt | Never | From the Book after every fold |
 
 `SheetPiece` keeps the two in step. Everything that changes paper goes through it.
@@ -83,6 +83,50 @@ for floppy paper, where they work very well.
 | Ctrl | Reach the underside: the flap below |
 | Enter, or Complete | End the folding: flaps become hinges |
 | Drag a flap, once complete | Set its angle. Shift turns it freely |
+| L | Lock or free the flap under the pointer. Shift: every layer there |
+| Lock tool: click | Lock or free a flap |
+| Lock tool: drag | Paint a lock on, or off, the paper first pressed |
+| U | Free everything |
+
+## Locking paper
+
+A hand folding paper holds the rest of it down. Locking does that job: locked paper
+stays still, pressed flat on the table, and nothing moves it until it is freed. What
+is not locked is ordinary floppy paper. Paper lifted by a hand pulls the paper it is
+joined to, so without a lock the layer under a flap comes up with it.
+
+- **A made fold locks down** with the layers it lands on, as if creased and held
+  under a hand. That is the fold's joint with the paper underneath. "Folds stay
+  loose" turns this off, and folds then behave as they did before locking existed.
+- **Freeing the next flap** is one key: L over it. A layer can be freed while the
+  one under it stays locked, so folding only the top layer leaves the rest still.
+- **Part of a flap** can be locked or freed by painting it with the Lock tool. The
+  brush paints only the paper it was first pressed on, so a hidden layer can be
+  locked under a loose one. Shift paints every layer.
+- **Locked paper cannot be taken hold of,** and a fold that would move it is refused.
+- **A fold that locked paper is in the way of** inks that paper while the hand holds
+  it lined up, and L frees exactly that.
+- **Following a recipe,** each step frees what it moves, folds, and locks the result.
+  Step 9 of the plane is then: L over the top wing, pull it, drop it. No pins.
+
+How the cloth does it:
+
+- A stack with a locked layer in it does not move, and nor do the points loose paper
+  shares with it. A loose layer lying there is held too, until a hand lifts it off as
+  a flap.
+- Locking presses paper flat where it lies, level on the table. Paper locked while
+  it hung in the air stayed there, and a bend with all four of its points held then
+  divided by nothing in the solver.
+- **A pull cannot tear paper.** A hand carries paper only as far as it reaches from
+  locked paper, or from another hand, measured on the unfolded sheet. Pulling further,
+  the pin strains and a red line runs to where the hand is aiming. Dragged 12 m away
+  from locked paper, the paper stretched 13% when a hand could simply get 0.3 m ahead
+  of it; with reach it stretches 0.7%, and the hand stops 1 cm from its paper.
+  Capping how hard a hand pulls was tried first. It also stopped a hand holding a
+  sheet up, because a solver cannot tell weight from paper that is held.
+
+Locked paper is inked with indigo hatching that folds with it. A new lock spreads out
+from where it was pressed, and paper that was freed glows for a moment.
 
 ## How paper keeps from going through itself
 
@@ -101,7 +145,8 @@ A made fold merges into the stack, so it stays shut. When a flap lifts off, its 
 becomes a hinge with a rest angle of 180 degrees, so it wants to stay closed. A
 crease is a line of weakness, so it stiffens far less with thickness than flat paper.
 That is why a pin can open a wing when the body is pinned, and why it falls shut when
-let go. With nothing pinning the body, pulling a wing lifts the whole plane.
+let go. With nothing holding the body, pulling a wing lifts the whole plane, so the
+body is locked instead (see Locking paper).
 
 Paper is joined only where it runs on into other paper. A layer lifted for a fold
 shares the line's points with the layer it lay on, through the stack beside them,
