@@ -4,6 +4,7 @@ import { UNITS_PER_CELL as U } from '@/core/fold/lattice';
 import type { LineKind, MirrorLine } from '@/core/fold/lattice';
 import { SheetPiece } from '@/core/fold/SheetPiece';
 import { buildSoftMesh } from '@/core/fold/soft/softMesh';
+import { FULL_STRAIN, StrainClock } from '@/core/fold/soft/SoftSheet';
 import { SheetView } from '@/core/render/SheetView';
 import { LineSegments } from 'three';
 import { FoldBook } from '@/core/fold/FoldBook';
@@ -567,6 +568,60 @@ describe('hardening', () => {
     expect(piece.soft.hardened).toBe(true);
     piece.harden(false);
     expect(piece.soft.hardened).toBe(false);
+  });
+});
+
+describe('bodies and hands', () => {
+  it('never lets paper pass through a body, however it is swept across it', () => {
+    const piece = new SheetPiece(sheet);
+    const body = { x: 0, z: 0, bottom: 0.15, top: 0.78, radius: 0.22 };
+    piece.bodies.push(body);
+    const { soft } = piece;
+    let corner = 0, best = Infinity;
+    for (let t = 0; t < soft.mesh.triCount; t++) {
+      const v = (soft.mesh.tris[t * 3] as number) * 2;
+      const d = Math.hypot((soft.mesh.flat[v] as number) + 5, (soft.mesh.flat[v + 1] as number) + 5);
+      if (d < best) {
+        best = d;
+        corner = t;
+      }
+    }
+    const hand = soft.addPin(corner, 1 / 3, 1 / 3, 1 / 3);
+    let deepest = 0;
+    for (let i = 0; i < 150; i++) {
+      const t = Math.min(1, i / 110);
+      hand.x = -5 + t * 10;
+      hand.z = -5 + t * 10;
+      hand.y = 0.5;
+      piece.step(DT);
+      const { x } = piece.soft;
+      for (let j = 0; j < x.length; j += 3) {
+        const y = x[j + 1] as number;
+        if (y < body.bottom || y > body.top) continue;
+        deepest = Math.max(deepest, body.radius - Math.hypot((x[j] as number) - body.x, (x[j + 2] as number) - body.z));
+      }
+    }
+    console.log('deepest any paper went into the body', deepest.toFixed(3), 'm');
+    expect(deepest).toBeLessThan(0.05);
+  });
+
+  it('keeps a body after the cloth is rebuilt by a fold', () => {
+    const piece = new SheetPiece(sheet);
+    piece.bodies.push({ x: 1, z: 1, bottom: 0.15, top: 0.78, radius: 0.22 });
+    foldAll(piece, line('x', 5), 1);
+    expect(piece.soft.bodies).toHaveLength(1);
+  });
+
+  it('slips a grip held at full strain, but not one that eases off', () => {
+    const clock = new StrainClock();
+    let slipped = false;
+    for (let i = 0; i < 7; i++) slipped ||= clock.update(FULL_STRAIN, 0.1);
+    expect(slipped).toBe(false);
+    for (let i = 0; i < 5; i++) clock.update(0, 0.1);
+    for (let i = 0; i < 7; i++) slipped ||= clock.update(FULL_STRAIN, 0.1);
+    expect(slipped).toBe(false);
+    for (let i = 0; i < 3; i++) slipped ||= clock.update(FULL_STRAIN * 2, 0.1);
+    expect(slipped).toBe(true);
   });
 });
 

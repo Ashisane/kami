@@ -2,7 +2,8 @@ import { Box3, Group, Plane, Raycaster, Vector2, Vector3 } from 'three';
 import type { PerspectiveCamera, Scene } from 'three';
 import { Spring } from '@/core/anim/spring';
 import type { SheetDefinition } from '@/core/asset/sheetTypes';
-import { guessFold, lineAcrossSheet } from '@/core/fold/foldGuide';
+import { lineAcrossSheet } from '@/core/fold/foldGuide';
+import { aimFold, applyLift, liftFor, PlanCache, SNAP_RADIUS } from '@/core/fold/foldIntent';
 import type { FoldGuess } from '@/core/fold/foldGuide';
 import { FoldBook } from '@/core/fold/FoldBook';
 import type { Landing } from '@/core/fold/FoldBook';
@@ -26,16 +27,12 @@ import { FixedStep } from '@/core/sim/FixedStep';
 import { AngleTag, FlapHint, FoldGhost, HeldMarks, LockBrush, PIN_COLOURS, PinMarker, Tether } from './LabMarkers';
 
 const MAX_PINS = 3;
-/** How close the held point must be to its landing for a drop to crease. */
-const SNAP_RADIUS = 1.5;
 const FOLLOW_RATE = 16;
 const MARKER_PICK_RADIUS = 0.42;
 const SETTLE_STEPS = 30;
 /** Pointer travel, in pixels, that turns a click into a drag. */
 const DRAG_START = 6;
 const DRAG_PLANE_HEIGHT = 0.05;
-/** Metres a hand is wheeled up before it counts as holding paper up, not bringing it to a fold. */
-const HOLDING_UP = 0.5;
 /** Degrees a joint snaps to. Shift turns it freely. */
 const ANGLE_SNAP = 15;
 /** The shortest lever a drag is measured on, in metres, so grabbing by the hinge still works. */
@@ -183,8 +180,7 @@ export class FoldLab {
   private assessment: Assessment | null = null;
   /** Where the hand is aiming on the flat paper, so a check can see what the guide was given. */
   private aimedAt: { x: number; z: number } | null = null;
-  private planKey = '';
-  private cachedPlan: PiecePlan | null = null;
+  private readonly plans = new PlanCache();
 
   private readonly clock = new FixedStep();
   private readonly ghost: FoldGhost;
@@ -458,7 +454,7 @@ export class FoldLab {
     grip.carried = true;
     this.active = grip;
     this.assessment = null;
-    this.planKey = '';
+    this.plans.clear();
   }
 
   private readonly onWheel = (event: WheelEvent): void => {
@@ -502,7 +498,7 @@ export class FoldLab {
       this.drop(grip);
       return;
     }
-    if (press.moved) this.setMessage('Holding. Click the pin to drop it and crease, or right click to let it fall.');
+    if (press.moved) this.setMessage(this.blocking ? BLOCKED_TEXT : 'Holding. Click the pin to drop it and crease, or right click to let it fall.');
     else this.setMessage('Pinned.');
   };
 
@@ -858,25 +854,14 @@ export class FoldLab {
     const { piece } = grip.bench;
     // The fold follows the hand, not the paper trailing behind it, so what you
     // aim at is what you get, however slow the frame was.
-    const flatNow = readFlat(grip.lay ?? piece.frameOf(piece.lifted), grip.target);
-    this.aimedAt = { x: flatNow.x, z: flatNow.z };
-    const guess = guessFold(piece, grip.flat, flatNow);
-    if (!guess) return null;
-
-    const landing = this.landingFor(flatNow.height);
-    const key = `${grip.slot}:${guess.line.kind}:${guess.line.c}:${guess.side}:${landing.kind}`;
-    if (key !== this.planKey || !this.cachedPlan) {
-      this.planKey = key;
-      this.cachedPlan = piece.plan({ line: guess.line, side: guess.side, seeds: grip.seeds, landing });
-    }
-    const plan = this.cachedPlan;
-    const reachable = !plan.failure && guess.miss < SNAP_RADIUS;
+    const aim = aimFold(piece, grip.lay ?? piece.frameOf(piece.lifted), grip.flat, grip.target, grip.seeds, this.plans, String(grip.slot));
+    this.aimedAt = aim ? { x: aim.aimedAt.x, z: aim.aimedAt.z } : readFlat(grip.lay ?? piece.frameOf(piece.lifted), grip.target);
+    if (!aim) return null;
+    const { guess, plan, landing, reachable } = aim;
     this.showBlocking(grip.bench, plan.failure === 'held' && guess.miss < SNAP_RADIUS ? plan.moved : null);
-    // Only a fold the hand is bringing the paper to. A hand wheeled up is holding paper
-    // up, as when opening a wing, and lifting for a fold there would break the wing apart.
-    if (grip.carried && !this.completed) {
-      if (reachable && grip.lift < HOLDING_UP) this.liftFold(grip, plan.moved, guess.line, landing.kind === 'under');
-      else if (grip.flap.size > 0) this.liftFold(grip, grip.flap, null, !grip.fromAbove);
+    if (grip.carried && !this.completed && applyLift(piece, liftFor(aim, grip.lift, grip.flap, !grip.fromAbove))) {
+      grip.peeled = true;
+      this.regrip(grip.bench);
     }
     return { guess, plan, landing, reachable };
   }
@@ -890,25 +875,12 @@ export class FoldLab {
     if (faces) {
       this.hover = null;
       this.hint.show(bench.piece.soft.mesh, faces, 'lock');
-      this.setMessage('Locked paper is in the way of this fold. Press L to free it.');
+      this.setMessage(BLOCKED_TEXT);
     } else if (!this.hover && !this.freed) {
       this.hint.hide();
     }
   }
 
-  /** The hand now holds this paper: what a fold will move, bending along its line, or its own flap. */
-  private liftFold(grip: Grip, paper: ReadonlySet<number>, line: MirrorLine | null, under: boolean): void {
-    const { bench } = grip;
-    const { lifted } = bench.piece;
-    if (lifted.size === paper.size && [...paper].every((f) => lifted.has(f))) return;
-    bench.piece.liftFor(paper, line, under);
-    grip.peeled = true;
-    this.regrip(bench);
-  }
-
-  private landingFor(height: number): Landing {
-    return height < -0.2 ? { kind: 'under' } : { kind: 'over' };
-  }
 
   private updateGuide(dt: number): void {
     const grip = this.active;
@@ -1396,7 +1368,7 @@ export class FoldLab {
     const { piece } = bench;
     const changed = piece.lock(faces, locking);
     if (changed.size === 0) return 0;
-    this.planKey = '';
+    this.plans.clear();
     if (locking) {
       this.marks.press(changed, from);
       // A hand on paper that is now held has nothing left to pull.
@@ -1646,6 +1618,7 @@ const FAILURE_TEXT: Record<FoldRefusal, string> = {
   held: 'Locked paper would have to move. Free it first: L over it, or the Lock tool.',
 };
 
+const BLOCKED_TEXT = 'Locked paper is in the way of this fold. Press L to free it.';
 const LOCKED_TEXT = 'Locked: it stays put, whatever is pulled around it.';
 const FREED_TEXT = 'Free: it can be lifted and folded now.';
 

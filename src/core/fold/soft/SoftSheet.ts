@@ -51,6 +51,24 @@ export interface Pin {
   span: Map<Pin, number>;
   /** How far past the paper's reach the hand is trying to go, in metres. */
   strain: number;
+  /** How hard it holds: the share of the way to the hand paper is pulled each substep. */
+  strength: number;
+  /** True if other hands can carry paper only as far as it reaches from this one. Feet pressing down do not. */
+  anchoring: boolean;
+}
+
+/**
+ * Something standing in the paper's way, such as a being: an upright capsule paper
+ * cannot pass through. It starts a little above the ground, so paper underfoot is
+ * stood on, not shoved aside.
+ */
+export interface Body {
+  x: number;
+  z: number;
+  /** Heights of the capsule's spine, bottom and top, in metres. */
+  bottom: number;
+  top: number;
+  radius: number;
 }
 
 const BEND_COMPLIANCE = 0.02;
@@ -100,6 +118,54 @@ function restGap(a: Float64Array, b: Float64Array): number {
   return shortest;
 }
 
+/** Moves a point to just outside a body, if it is inside. True if it moved. */
+function outOf(body: Body, reach: number, point: { x: number; y: number; z: number }): boolean {
+  if (point.y < body.bottom - reach || point.y > body.top + reach) return false;
+  const dx = point.x - body.x, dz = point.z - body.z;
+  if (dx * dx + dz * dz > reach * reach) return false;
+  const cy = Math.max(body.bottom, Math.min(body.top, point.y));
+  const dy = point.y - cy;
+  const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+  if (distance >= reach) return false;
+  if (distance < 1e-6) {
+    point.x = body.x + reach;
+    return true;
+  }
+  const s = reach / distance;
+  point.x = body.x + dx * s;
+  point.y = cy + dy * s;
+  point.z = body.z + dz * s;
+  return true;
+}
+
+/** Seconds a hand can be held at full strain before its grip slips. */
+export const SLIP_SECONDS = 0.8;
+/** Metres past its reach a hand must aim for the strain to count as full. */
+export const FULL_STRAIN = 0.6;
+
+/**
+ * Times how long a hand has been pulling past what paper allows. Paper never tears:
+ * held at full strain long enough, the grip slips and lets go instead.
+ */
+export class StrainClock {
+  private seconds = 0;
+
+  /** Advances by a frame. True once the grip should slip. */
+  update(strain: number, dt: number): boolean {
+    this.seconds = strain >= FULL_STRAIN ? this.seconds + dt : Math.max(0, this.seconds - dt * 2);
+    return this.seconds >= SLIP_SECONDS;
+  }
+
+  /** How close the grip is to slipping, from 0 to 1. */
+  get tension(): number {
+    return Math.min(1, this.seconds / SLIP_SECONDS);
+  }
+
+  reset(): void {
+    this.seconds = 0;
+  }
+}
+
 export class SoftSheet {
   readonly x: Float64Array;
   readonly v: Float64Array;
@@ -126,6 +192,7 @@ export class SoftSheet {
 
   private readonly contactCell: number;
   private readonly reachPoint = { x: 0, y: 0, z: 0 };
+  private readonly bodyPoint = { x: 0, y: 0, z: 0 };
 
   /** Points of locked paper, which bound how far any hand can carry the paper it holds. */
   private readonly anchors: Int32Array;
@@ -141,6 +208,8 @@ export class SoftSheet {
     readonly mesh: SoftMesh,
     settings: Partial<SoftSettings> = {},
     initial?: Float64Array,
+    /** Bodies the paper wraps around and is pushed aside by. Move them freely; they are read every substep. */
+    readonly bodies: Body[] = [],
   ) {
     this.settings = { ...DEFAULT_SOFT, ...settings };
     const n = mesh.vertexCount;
@@ -252,7 +321,7 @@ export class SoftSheet {
       }
       reach[a] = shortest;
     }
-    const pin: Pin = { tri, b0, b1, b2, x: 0, y: 0, z: 0, heldX: 0, heldY: 0, heldZ: 0, rest, reach, span: new Map(), strain: 0 };
+    const pin: Pin = { tri, b0, b1, b2, x: 0, y: 0, z: 0, heldX: 0, heldY: 0, heldZ: 0, rest, reach, span: new Map(), strain: 0, strength: PIN_STRENGTH, anchoring: true };
     for (const other of this.pins) {
       const gap = restGap(rest, other.rest);
       pin.span.set(other, gap);
@@ -322,6 +391,8 @@ export class SoftSheet {
         // Twice, because a hanging sheet puts all its weight through a few edges.
         this.solveDistances();
         this.solveDistances();
+        // Last, so no paper is left inside a body at the end of a substep.
+        this.solveBodies();
         this.solveGround();
       }
       this.updateVelocity(h);
@@ -424,7 +495,7 @@ export class SoftSheet {
       const v = (anchors[i] as number) * 3;
       ball(x[v] as number, x[v + 1] as number, x[v + 2] as number, (reach[i] as number) * (1 + REACH_GIVE) + REACH_SLACK);
     }
-    for (const [other, gap] of pin.span) ball(other.heldX, other.heldY, other.heldZ, gap * (1 + REACH_GIVE) + REACH_SLACK);
+    for (const [other, gap] of pin.span) if (other.anchoring) ball(other.heldX, other.heldY, other.heldZ, gap * (1 + REACH_GIVE) + REACH_SLACK);
   }
 
   private solvePins(): void {
@@ -439,11 +510,52 @@ export class SoftSheet {
       const wa = (w[ia] as number) * pin.b0, wb = (w[ib] as number) * pin.b1, wc = (w[ic] as number) * pin.b2;
       const total = wa * pin.b0 + wb * pin.b1 + wc * pin.b2;
       if (total === 0) continue;
-      const s = PIN_STRENGTH / total;
+      const s = pin.strength / total;
       const dx = (pin.heldX - px) * s, dy = (pin.heldY - py) * s, dz = (pin.heldZ - pz) * s;
       x[a] = (x[a] as number) + dx * wa; x[a + 1] = (x[a + 1] as number) + dy * wa; x[a + 2] = (x[a + 2] as number) + dz * wa;
       x[b] = (x[b] as number) + dx * wb; x[b + 1] = (x[b + 1] as number) + dy * wb; x[b + 2] = (x[b + 2] as number) + dz * wb;
       x[c] = (x[c] as number) + dx * wc; x[c + 1] = (x[c + 1] as number) + dy * wc; x[c + 2] = (x[c + 2] as number) + dz * wc;
+    }
+  }
+
+  /**
+   * Pushes paper out of every body, to just outside its skin. Points first, then the
+   * middle of every edge, because an edge can be longer than a body is wide.
+   */
+  private solveBodies(): void {
+    const { x, w } = this;
+    const { edges } = this.mesh;
+    const skin = CONTACT_GAP;
+    const point = this.bodyPoint;
+    for (const body of this.bodies) {
+      const reach = body.radius + skin;
+      for (let e = 0; e < edges.length; e += 2) {
+        const a = (edges[e] as number) * 3, b = (edges[e + 1] as number) * 3;
+        const wa = w[a / 3] as number, wb = w[b / 3] as number;
+        if (wa + wb === 0) continue;
+        point.x = ((x[a] as number) + (x[b] as number)) / 2;
+        point.y = ((x[a + 1] as number) + (x[b + 1] as number)) / 2;
+        point.z = ((x[a + 2] as number) + (x[b + 2] as number)) / 2;
+        if (!outOf(body, reach, point)) continue;
+        // Move both ends by what the middle had to move, the lighter end more.
+        const dx = point.x - ((x[a] as number) + (x[b] as number)) / 2;
+        const dy = point.y - ((x[a + 1] as number) + (x[b + 1] as number)) / 2;
+        const dz = point.z - ((x[a + 2] as number) + (x[b + 2] as number)) / 2;
+        const ka = (2 * wa) / (wa + wb), kb = (2 * wb) / (wa + wb);
+        x[a] = (x[a] as number) + dx * ka; x[a + 1] = (x[a + 1] as number) + dy * ka; x[a + 2] = (x[a + 2] as number) + dz * ka;
+        x[b] = (x[b] as number) + dx * kb; x[b + 1] = (x[b + 1] as number) + dy * kb; x[b + 2] = (x[b + 2] as number) + dz * kb;
+      }
+      for (let i = 0; i < w.length; i++) {
+        if (w[i] === 0) continue;
+        const j = i * 3;
+        point.x = x[j] as number;
+        point.y = x[j + 1] as number;
+        point.z = x[j + 2] as number;
+        if (!outOf(body, reach, point)) continue;
+        x[j] = point.x;
+        x[j + 1] = point.y;
+        x[j + 2] = point.z;
+      }
     }
   }
 

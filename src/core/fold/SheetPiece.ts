@@ -12,7 +12,7 @@ import { extractRotation, rotateInto } from './soft/rotation';
 import type { Quat } from './soft/rotation';
 import { buildSoftMesh, metresPerUnit } from './soft/softMesh';
 import { CONTACT_GAP, SoftSheet } from './soft/SoftSheet';
-import type { SoftSettings } from './soft/SoftSheet';
+import type { Body, SoftSettings } from './soft/SoftSheet';
 
 /** Why a fold cannot be made: one of the Book's reasons, or paper that is locked. */
 export type FoldRefusal = FoldFailure | 'held';
@@ -55,9 +55,11 @@ export class SheetPiece {
     private settings: Partial<SoftSettings> = {},
     initial?: Float64Array,
     held: Iterable<number> = [],
+    /** Bodies standing in the paper's way, kept across every rebuild of the cloth. */
+    readonly bodies: Body[] = [],
   ) {
     this.holds = new Set(held);
-    this.soft = new SoftSheet(buildSoftMesh(book, definition.size, [], [], this.holds), this.solverSettings(), initial);
+    this.soft = new SoftSheet(buildSoftMesh(book, definition.size, [], [], this.holds), this.solverSettings(), initial, bodies);
   }
 
   private solverSettings(): Partial<SoftSettings> {
@@ -108,7 +110,7 @@ export class SheetPiece {
     if (this.bends.length !== this.flaps.length) this.bends = this.flaps.map(() => null);
     // A finished craft is stiff plates, and nothing on it is held.
     const mesh = buildSoftMesh(this.book, this.definition.size, this.flaps, this.bends, this.finished ? undefined : this.holds);
-    this.soft = new SoftSheet(mesh, this.solverSettings(), positions(mesh));
+    this.soft = new SoftSheet(mesh, this.solverSettings(), positions(mesh), this.bodies);
     this.revision++;
   }
 
@@ -701,6 +703,12 @@ export class SheetPiece {
     return best;
   }
 
+  /** The outermost flap at a face that is free to open out, and the crease it turns on, or null. */
+  openingAt(face: number, under = false): { faces: ReadonlySet<number>; line: MirrorLine } | null {
+    const opening = this.jointAt(face, under);
+    return opening ? { faces: opening.faces, line: lineOfKey(opening.hinge) } : null;
+  }
+
   /** Works a crease's line key out into a joint, shut. */
   private makeJoint(faces: ReadonlySet<number>, hinge: string, under: boolean): Joint {
     const { book } = this;
@@ -924,7 +932,7 @@ export class SheetPiece {
           initial[v * 3 + 2] = before[f * 9 + k * 3 + 2] as number;
         }
       }
-      return new SheetPiece(this.definition, book, this.settings, initial, held);
+      return new SheetPiece(this.definition, book, this.settings, initial, held, this.bodies);
     });
     this.holds = new Set(heldIn(this.book));
     if (books.length === 1 && books[0] === this.book) {
