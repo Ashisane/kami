@@ -9,6 +9,11 @@ const GRIDS = [
   { value: '40', label: '0.5 m cells', title: '3,200 triangles, folds every 0.25 m' },
 ] as const;
 
+const PAPERS = [
+  { value: 'square', label: 'Square', title: 'A 10 m square sheet' },
+  { value: 'a4', label: 'A4', title: 'A 7 by 10 m sheet, the shape of A4' },
+] as const;
+
 const TOOLS = [
   { value: 'fold', label: 'Fold', title: 'Pull paper and drop the pin to fold' },
   { value: 'cut', label: 'Cut', title: 'Draw along a line to cut every layer (X)' },
@@ -128,6 +133,7 @@ export function foldPanel({ stage }: LibraryContext): HTMLElement {
     ),
     section(
       'Bench',
+      segmented(PAPERS, lab.readout().paper, (value) => lab.setPaper(value)).element,
       segmented(GRIDS, String(lab.cells) as '20' | '40', (value) => lab.setCells(Number(value))).element,
       slider({ label: 'Floppiness, for tuning', min: 0.05, max: 1, step: 0.05, value: lab.readout().floppiness, format: round(2), onInput: (value) => lab.setFloppiness(value) }),
       h('div.button-row', {}, button('Step back', () => lab.stepBack(), { title: 'Z' }), button('Fresh sheet', () => lab.reset(), { title: 'R' })),

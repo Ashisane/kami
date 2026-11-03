@@ -45,7 +45,13 @@ for floppy paper, where they work very well.
 2. A player drags a point. The paper rolls over. Letting go does nothing: the pin
    stays, holding the paper up, with its guide showing.
 3. `guessFold` finds the line halfway between where the point started and where the
-   hand is, and snaps it to the grid. Halving the paper is sticky.
+   hand is, and snaps it to the grid. Halving the paper is sticky, but only within
+   0.8 of a step, so the line beside the middle can still be chosen: a plane's wing
+   crease sits half a metre off its middle.
+   The hand is read against the paper as it lay when the pull began. Paper being
+   pulled bends and rolls, and refitting to it each frame misread the hand by metres.
+   Once the hand brings paper to a fold, exactly what it would move lifts, bending
+   freely along the line, so the hand sees the fold it is making.
 4. Dropping the pin (click it, or Space) is the one action that creases paper.
    `FoldBook.plan` refuses anything impossible.
 5. `SheetPiece.fold` rebuilds the cloth, and layers on a site merge into one
@@ -57,7 +63,8 @@ for floppy paper, where they work very well.
 
 - **What moves:** everything connected to the held face without crossing the line.
   That alone gives "only the top flap folds".
-- **Jams:** a stationary layer on the side paper must rotate towards pins it down.
+- **Carrying:** paper lying on what moves goes over with it. A layer cannot turn out
+  from under another, as a hand folding a stack carries the layers on top.
 - **Layer validity:** two creases may nest but not interleave, a flat sheet cannot
   pass through a crease, and two flat sheets crossing a line keep their order.
 
@@ -112,7 +119,7 @@ Layers are too thin to tell apart by eye, so hovering lights up the flap first.
 Anything that shows can be taken hold of. When no whole flap is free, because part
 of it is tucked under something, `flapToLift` falls back to the part that can be
 seen, and that bends away from whatever covers it. The Book only hears about it if
-the pin is dropped, and refuses a fold that would jam. A lifted layer covers nothing,
+the pin is dropped, and refuses a fold whose layers would cross. A lifted layer covers nothing,
 so opening a wing exposes what was under it.
 
 How far it comes up depends on what still holds it. Measured on the lock tip, with

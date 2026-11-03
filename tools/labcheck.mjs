@@ -203,6 +203,23 @@ try {
   r = await lab();
   check('and it can go back to folding', !r.completed, r.message);
 
+  // 6b. Fold the plane's top wing by hand, at step 9, where the flaps lie over it.
+  // Seven folds: cutting the sheet to size is a step, but not a fold.
+  r = await buildRecipe('plane-half', 'Nakamura Plane', 7);
+  await pin(-2.3, 3.5);
+  await pin(-2.3, 0.5);
+  // From 0.5 m to 3.5 m on the flat sheet: halfway is x = 2, in the middle of its snap band.
+  await drag([-4.5, 3], [-1.5, 3], { hold: 1100, midShot: 'plane-wing-by-hand' });
+  r = await lab();
+  const aim = (p) => p ? `${(p.x + 5).toFixed(2)}, ${(p.z + 5).toFixed(2)}` : 'none';
+  check("the top wing lifts and is ready to fold on the x = 2 line", r.held?.ready === true, `grabbed at ${aim(r.held?.from)}, aimed at ${aim(r.held?.to)}, hand in the world at ${r.held?.x.toFixed(2)}, ${r.held?.y.toFixed(2)}, ${r.held?.z.toFixed(2)}`);
+  await page.keyboard.press('Space');
+  await wait(1400);
+  r = await lab();
+  check("and dropping it folds the wing, flaps and all, as the recipe does", r.folds === 8 && r.log.at(-1)?.at === 2 && r.tallest === 16, `${r.folds} folds, ${r.tallest} layers, ${JSON.stringify(r.log.at(-1))}`);
+  await shot('plane-wing-folded-by-hand');
+  await page.keyboard.press('Escape');
+
   // 7. Real recipes, step by step, then open the plane's wing by hand.
   r = await buildRecipe('plane', 'Nakamura Plane', 9);
   const box = await page.evaluate(() => window.kami.crossings());
@@ -339,6 +356,17 @@ try {
   await wait(700);
 
   await buildRecipe('boat', 'Paper Boat', 7);
+
+  // 7d. Paper can start as A4, with no cutting.
+  await page.keyboard.press('r');
+  await wait(300);
+  await page.locator('.segment', { hasText: 'A4' }).click();
+  await wait(700);
+  r = await lab();
+  check('A4 starts as a 7 by 10 m sheet', r.paper === 'a4' && r.faces === 560 && r.pieces === 1, `${r.faces} faces, ${r.pieces} piece`);
+  await shot('a4');
+  await page.locator('.segment', { hasText: 'Square' }).click();
+  await wait(500);
 
   // 8. The finer grid, on the real machine.
   await page.keyboard.press('Escape');

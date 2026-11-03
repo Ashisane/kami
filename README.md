@@ -23,6 +23,7 @@ Opens the Fold Lab at http://localhost:5173.
 | Enter | Mark it complete: flaps become hinges |
 | Drag a flap, once complete | Set its angle. Shift turns it freely |
 | N | Next recipe step |
+| Square / A4 | Start from a square sheet or a 7 by 10 m one |
 | X | Cut tool |
 | Z / R | Step back / fresh sheet |
 

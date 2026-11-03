@@ -21,8 +21,12 @@ export interface FoldGuess {
 const KINDS: readonly LineKind[] = ['x', 'z', 'sum', 'diff'];
 /** The smallest drag that counts as trying to fold. */
 const MIN_DRAG = 0.5;
-/** How close to the paper's middle, in metres, before a fold locks onto it. */
-const HALVING_PULL = 0.7;
+/**
+ * How close to the paper's middle a fold locks onto it, in steps between lines. Under
+ * one step, so the line beside the middle can still be chosen: at 0.7 m, a plane's
+ * wing crease 0.5 m off its middle could never be folded.
+ */
+const HALVING_PULL = 0.8;
 
 export function guessFold(piece: SheetPiece, from: { x: number; z: number }, to: { x: number; z: number }): FoldGuess | null {
   const dx = to.x - from.x;
@@ -49,7 +53,7 @@ export function guessFold(piece: SheetPiece, from: { x: number; z: number }, to:
   const step = kind === 'x' || kind === 'z' ? UNITS_PER_CELL : UNITS_PER_CELL * 2;
   // Halving the paper is what people are nearly always aiming for, so it is sticky.
   const centre = paperCentre(piece, kind);
-  const aim = Math.abs(raw - centre) * piece.unit < HALVING_PULL ? centre : raw;
+  const aim = Math.abs(raw - centre) < HALVING_PULL * step ? centre : raw;
   const line: MirrorLine = { kind, c: Math.round(aim / step) * step };
   if (!isMirror(line)) return null;
 

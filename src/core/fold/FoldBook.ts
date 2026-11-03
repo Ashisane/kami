@@ -27,7 +27,7 @@ export interface FoldRequest {
   landing?: Landing;
 }
 
-export type FoldFailure = 'not-a-grid-line' | 'nothing-moves' | 'nothing-stays' | 'jammed' | 'layers-cross';
+export type FoldFailure = 'not-a-grid-line' | 'nothing-moves' | 'nothing-stays' | 'layers-cross';
 
 export interface FoldPlan {
   request: FoldRequest;
@@ -165,18 +165,26 @@ export class FoldBook {
     const fail = (failure: FoldFailure): FoldPlan => ({ request, moved, failure });
     if (!isMirror(request.line)) return fail('not-a-grid-line');
     if (moved.size === 0) return fail('nothing-moves');
-    if (moved.size === this.faces.length) return fail('nothing-stays');
 
     const landing = request.landing ?? { kind: 'over' };
     if (landing.kind !== 'tuck') {
-      for (const f of moved) {
-        const stack = this.stackOf(f);
-        const h = stack.indexOf(f);
-        // A stationary layer on the side it has to rotate towards pins it down.
-        const blockers = landing.kind === 'over' ? stack.slice(h + 1) : stack.slice(0, h);
-        if (blockers.some((g) => !moved.has(g))) return fail('jammed');
+      // Paper lying on what moves goes over with it, as it would under a hand: a layer
+      // cannot turn out from under another. It shares the site, so it is on the moving
+      // side too. Paper that truly cannot follow is refused below, as layers crossing.
+      for (let grew = true; grew; ) {
+        grew = false;
+        for (const f of [...moved]) {
+          const stack = this.stackOf(f);
+          const h = stack.indexOf(f);
+          for (const g of landing.kind === 'over' ? stack.slice(h + 1) : stack.slice(0, h)) {
+            if (moved.has(g)) continue;
+            for (const carried of this.gather(request.line, request.side, [g])) moved.add(carried);
+            grew = true;
+          }
+        }
       }
     }
+    if (moved.size === this.faces.length) return fail('nothing-stays');
 
     const trial = this.clone();
     trial.apply(request.line, moved, landing);

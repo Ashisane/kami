@@ -1,5 +1,6 @@
 import type { FoldBook } from '../FoldBook';
-import { UNITS_PER_CELL } from '../lattice';
+import { sideOf, UNITS_PER_CELL } from '../lattice';
+import type { MirrorLine } from '../lattice';
 import { layerHeights } from '../levels';
 
 /**
@@ -33,6 +34,8 @@ export interface SoftMesh {
   hingeLayers: Float64Array;
   /** 1 where a hinge is a made crease, which wants to stay shut. */
   hingeFolded: Uint8Array;
+  /** 1 where paper is being folded right now: it bends freely there, with no minimum radius. */
+  hingeLoose: Uint8Array;
   /** Which triangle each book face belongs to, by face id; -1 if not in this piece. */
   faceTri: Int32Array;
   /** Which vertex each face corner belongs to: index by face * 3 + corner. */
@@ -71,7 +74,7 @@ class Corners {
   }
 }
 
-export function buildSoftMesh(book: FoldBook, size: number, flaps: readonly ReadonlySet<number>[] = []): SoftMesh {
+export function buildSoftMesh(book: FoldBook, size: number, flaps: readonly ReadonlySet<number>[] = [], bends: readonly (MirrorLine | null)[] = []): SoftMesh {
   const corners = new Corners(book.faceCount * 3);
   const { rest, at, neighbour } = book;
   const unit = metresPerUnit(book, size);
@@ -183,6 +186,10 @@ export function buildSoftMesh(book: FoldBook, size: number, flaps: readonly Read
   const hingeList: number[] = [];
   const hingeLayerList: number[] = [];
   const hingeFoldedList: number[] = [];
+  const hingeLooseList: number[] = [];
+  /** True if a vertex lies on the line a flap is being folded along. */
+  const onBend = (v: number, line: MirrorLine | null | undefined) =>
+    !!line && sideOf(line, Math.round((flat[v * 2] as number) / unit + half), Math.round((flat[v * 2 + 1] as number) / unit + half)) === 0;
   const opposite = (t: number, a: number, b: number) => {
     for (let k = 0; k < 3; k++) {
       const v = tris[t * 3 + k] as number;
@@ -219,6 +226,8 @@ export function buildSoftMesh(book: FoldBook, size: number, flaps: readonly Read
         hingeList.push(a, b, wingS, wingT);
         hingeLayerList.push(((triLayers[s] as number) + (triLayers[t] as number)) / 2);
         hingeFoldedList.push(folded ? 1 : 0);
+        const flap = Math.max(flapS, flapT);
+        hingeLooseList.push(!folded && flapS !== flapT && onBend(a, bends[flap]) && onBend(b, bends[flap]) ? 1 : 0);
       }
     }
   }
@@ -256,6 +265,7 @@ export function buildSoftMesh(book: FoldBook, size: number, flaps: readonly Read
     hinges: Int32Array.from(hingeList),
     hingeLayers: Float64Array.from(hingeLayerList),
     hingeFolded: Uint8Array.from(hingeFoldedList),
+    hingeLoose: Uint8Array.from(hingeLooseList),
     faceTri,
     cornerVertex,
     cornerHeight,

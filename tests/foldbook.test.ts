@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { FoldBook } from '@/core/fold/FoldBook';
+import { blankBook } from '@/core/fold/paper';
 import type { FoldRequest, Landing } from '@/core/fold/FoldBook';
 import { buildTiling, reflectX, reflectZ, siteKey, UNITS_PER_CELL as U } from '@/core/fold/lattice';
 import type { LineKind, MirrorLine } from '@/core/fold/lattice';
@@ -116,16 +117,26 @@ describe('folding', () => {
 });
 
 describe('impossible folds are refused', () => {
-  it('jams when a flap overlaps the crease and pins the paper down', () => {
+  it('starts an A4 sheet 7 by 10 m, centred, flat and whole', () => {
+    const book = blankBook(CELLS, 'a4');
+    expect(book.faces.length).toBe(560);
+    expect(book.tallest).toBe(1);
+    const xs = book.faces.flatMap((f) => [book.at[f * 6] as number, book.at[f * 6 + 2] as number, book.at[f * 6 + 4] as number]);
+    expect(Math.min(...xs)).toBe(m(1.5));
+    expect(Math.max(...xs)).toBe(m(8.5));
+    expect(blankBook(CELLS, 'square').faces.length).toBe(800);
+  });
+
+  it('carries a flap lying on the paper over with it, as a hand would', () => {
     const book = FoldBook.sheet(CELLS);
     fold(book, line('x', 6.5), 1);
-    // Hold only the bottom layer: the flap lying over the crease stays and blocks it.
+    // Hold only the bottom layer: the flap lying on it cannot stay behind, so it folds too.
     const bottom = book.faces.find((f) => (book.at[f * 6] as number) < m(1)) as number;
+    const everyLayer = book.plan({ line: line('x', 3.5), side: -1, seeds: everything(book) }).moved;
     const plan = book.fold({ line: line('x', 3.5), side: -1, seeds: [bottom] });
-    expect(plan.failure).toBe('jammed');
-    expect(book.tallest).toBe(2);
-    // Gripping every layer folds them together, which is fine.
-    expect(book.plan({ line: line('x', 3.5), side: -1, seeds: everything(book) }).failure).toBeNull();
+    expect(plan.failure).toBeNull();
+    expect(plan.moved).toEqual(everyLayer);
+    expect(book.violations()).toBe(0);
   });
 
   it('refuses a tuck that would make layers pass through each other', () => {

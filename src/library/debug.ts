@@ -20,6 +20,8 @@ export interface CaptureRequest {
   sheet?: string;
   /** A fold recipe to apply to the sheet. */
   recipe?: string;
+  /** The shape of a fresh sheet. */
+  paper?: 'square' | 'a4';
   /** Half-cells per side, to compare grid sizes. */
   cells?: number;
   /** Hold a flat spot up: x, z, height. */
@@ -112,6 +114,7 @@ export function installDebugApi({ stage, store }: LibraryContext, selectionLoade
         const { lab } = stage;
         lab.frozen = true;
         if (request.cells) lab.setCells(request.cells);
+        if (request.paper) lab.setPaper(request.paper);
         const failures = request.recipe ? lab.applyRecipe(request.recipe, request.steps).filter(Boolean) : [];
         if (failures.length) throw new Error(`Recipe ${request.recipe} failed: ${failures.join(', ')}`);
         if (request.hold) lab.holdAt(...request.hold);

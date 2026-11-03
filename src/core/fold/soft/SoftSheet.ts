@@ -155,9 +155,10 @@ export class SoftSheet {
 
   private applyStiffness(): void {
     const { floppiness } = this.settings;
-    const { hingeFolded, hingeLayers } = this.mesh;
+    const { hingeFolded, hingeLayers, hingeLoose } = this.mesh;
     for (let h = 0; h < this.hingeCompliance.length; h++) {
-      const layers = hingeLayers[h] as number;
+      // Where paper is being folded, it bends like one loose sheet, however thick.
+      const layers = hingeLoose[h] ? 1 : (hingeLayers[h] as number);
       // A crease is a line of weakness: thicker paper resists it only a little.
       this.hingeCompliance[h] = hingeFolded[h] ? CREASE_COMPLIANCE / layers : (BEND_COMPLIANCE * floppiness) / layers ** STACK_STIFFENING;
     }
@@ -336,7 +337,7 @@ export class SoftSheet {
   private solveHinges(h: number): void {
     const { hinges } = this.mesh;
     const { x, w } = this;
-    const { hingeFolded } = this.mesh;
+    const { hingeFolded, hingeLoose } = this.mesh;
     const count = hinges.length / 4;
     const inverseStep = 1 / (h * h);
     for (let n = 0; n < count; n++) {
@@ -368,7 +369,7 @@ export class SoftSheet {
         + wc * (gcx * gcx + gcy * gcy + gcz * gcz) + wd * (gdx * gdx + gdy * gdy + gdz * gdz);
       // Past the bend limit the edge stops dead, instead of springing softly.
       const bend = angle - (this.hingeRest[n] as number);
-      const overLimit = !hingeFolded[n] && Math.abs(bend) > BEND_LIMIT;
+      const overLimit = !hingeFolded[n] && !hingeLoose[n] && Math.abs(bend) > BEND_LIMIT;
       const error = overLimit ? bend - Math.sign(bend) * BEND_LIMIT : bend;
       const softness = overLimit ? 0 : (this.hingeCompliance[n] as number) * inverseStep;
       const lambda = -error / (weight + softness);

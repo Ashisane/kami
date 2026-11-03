@@ -6,13 +6,15 @@ import { guessFold, lineAcrossSheet } from '@/core/fold/foldGuide';
 import type { FoldGuess } from '@/core/fold/foldGuide';
 import { FoldBook } from '@/core/fold/FoldBook';
 import type { FoldFailure, FoldPlan, Landing } from '@/core/fold/FoldBook';
-import { lineNormal, sideOf, UNITS_PER_CELL } from '@/core/fold/lattice';
+import { lineNormal, UNITS_PER_CELL } from '@/core/fold/lattice';
 import type { LineKind, MirrorLine } from '@/core/fold/lattice';
 import type { Joint } from '@/core/fold/craft';
+import { blankBook } from '@/core/fold/paper';
+import type { PaperShape } from '@/core/fold/paper';
 import { foldRequest, RECIPES, toMirrorLine } from '@/core/fold/recipes';
 import type { CompleteStep, FoldStep, Recipe, RecipeStep, TrimStep } from '@/core/fold/recipes';
 import type { ReshapeFailure } from '@/core/fold/reshape';
-import { SheetPiece } from '@/core/fold/SheetPiece';
+import { readFlat, SheetPiece } from '@/core/fold/SheetPiece';
 import { countCrossings } from '@/core/fold/soft/crossings';
 import type { Pin } from '@/core/fold/soft/SoftSheet';
 import type { ScrapBurst } from '@/core/fx/ScrapBurst';
@@ -25,14 +27,14 @@ import { AngleTag, FlapHint, FoldGhost, PIN_COLOURS, PinMarker } from './LabMark
 const MAX_PINS = 3;
 /** How close the held point must be to its landing for a drop to crease. */
 const SNAP_RADIUS = 1.5;
-/** Fraction of the sheet's size around a grab that is not trusted as "staying put". */
-const NEAR_GRAB = 0.42;
 const FOLLOW_RATE = 16;
 const MARKER_PICK_RADIUS = 0.42;
 const SETTLE_STEPS = 30;
 /** Pointer travel, in pixels, that turns a click into a drag. */
 const DRAG_START = 6;
 const DRAG_PLANE_HEIGHT = 0.05;
+/** Metres a hand is wheeled up before it counts as holding paper up, not bringing it to a fold. */
+const HOLDING_UP = 0.5;
 /** Degrees a joint snaps to. Shift turns it freely. */
 const ANGLE_SNAP = 15;
 /** The shortest lever a drag is measured on, in metres, so grabbing by the hinge still works. */
@@ -59,7 +61,6 @@ interface Grip {
   /** Where the point sits on the flat sheet. */
   flat: { x: number; z: number };
   seeds: number[];
-  near: ReadonlySet<number>;
   /** Where the hand is trying to be. */
   target: Vector3;
   /** Extra height from the wheel. */
@@ -70,6 +71,14 @@ interface Grip {
   peeled: boolean;
   /** Grabbed from above, so pulling it should lift the top flap. */
   fromAbove: boolean;
+  /**
+   * The paper as it lay when the hand started pulling. The hand is read against this:
+   * paper being pulled bends and rolls, and a frame refitted to it each moment
+   * misread the hand by metres and lined up the wrong fold.
+   */
+  lay: ((x: number, z: number, out: Float64Array) => void) | null;
+  /** What this hand first lifted, to go back to when no fold is lined up. */
+  flap: ReadonlySet<number>;
 }
 
 /** What dropping a held point would do. */
@@ -103,6 +112,8 @@ export interface LabReadout {
   /** The joint being turned right now, or -1. */
   turning: number;
   cellMetres: number;
+  /** The shape a fresh sheet starts as. */
+  paper: PaperShape;
   floppiness: number;
   /** How far the paper rises off the ground, in metres. */
   height: number;
@@ -113,7 +124,7 @@ export interface LabReadout {
   /** Faces lifted off their stack right now. */
   liftedFaces: number;
   /** The pin that would fold if dropped, and whether it would succeed. */
-  held: { x: number; y: number; z: number; ready: boolean } | null;
+  held: { x: number; y: number; z: number; ready: boolean; from: { x: number; z: number }; to: { x: number; z: number } | null } | null;
   recipe: { recipe: Recipe; next: number } | null;
 }
 
@@ -129,9 +140,10 @@ export class FoldLab {
   private cutTo: { x: number; z: number } | null = null;
 
   private assessment: Assessment | null = null;
+  /** Where the hand is aiming on the flat paper, so a check can see what the guide was given. */
+  private aimedAt: { x: number; z: number } | null = null;
   private planKey = '';
   private cachedPlan: FoldPlan | null = null;
-  private moving: ReadonlySet<number> | null = null;
 
   private readonly clock = new FixedStep();
   private readonly ghost: FoldGhost;
@@ -149,6 +161,9 @@ export class FoldLab {
   private posing: { bench: Bench; joint: number; flat: { x: number; z: number }; raw: number; x: number; y: number } | null = null;
   /** True when the sheet starts turned over, for a recipe that wants its printed face outside. */
   private faceDown = false;
+  /** The shape fresh sheets start as. Recipes always start square: they cut their own. */
+  private paper: PaperShape = 'square';
+  private square = false;
   private simulationMs = 0;
   private message = 'Click paper to pin it, or drag it to pull it over.';
   private recipe: { recipe: Recipe; next: number } | null = null;
@@ -172,7 +187,7 @@ export class FoldLab {
     this.ghost = new FoldGhost(overlay);
     this.hint = new FlapHint(overlay);
     this.tag = new AngleTag(canvas.parentElement as HTMLElement);
-    this.addBench(new SheetPiece(definition));
+    this.addBench(this.blank());
     canvas.addEventListener('pointerdown', this.onDown);
     window.addEventListener('pointermove', this.onMove);
     window.addEventListener('pointerup', this.onUp);
@@ -362,13 +377,13 @@ export class FoldLab {
     if (!grip.carried && grip.seeds.length === 1 && !piece.pulling && piece.book.depth(grip.face) > 1 && piece.peel(grip.face, !grip.fromAbove)) {
       grip.peeled = true;
       this.regrip(grip.bench);
-      for (const f of piece.lifted) (grip.near as Set<number>).add(f);
     }
+    grip.lay = piece.frameNow(piece.lifted);
+    grip.flap = grip.peeled ? piece.lifted : new Set();
     grip.carried = true;
     this.active = grip;
     this.assessment = null;
     this.planKey = '';
-    this.moving = null;
   }
 
   private readonly onWheel = (event: WheelEvent): void => {
@@ -647,16 +662,7 @@ export class FoldLab {
     const marker = new PinMarker(PIN_COLOURS[slot] as string);
     this.overlay.add(marker.group);
 
-    // The paper being lifted is the one thing that cannot say where the sheet is.
-    const near = new Set<number>(piece.lifted);
-    const reach = this.definition.size * NEAR_GRAB;
-    for (const f of piece.book.faces) {
-      const i = f * 6;
-      const cx = piece.toMetres(((piece.book.at[i] as number) + (piece.book.at[i + 2] as number) + (piece.book.at[i + 4] as number)) / 3);
-      const cz = piece.toMetres(((piece.book.at[i + 1] as number) + (piece.book.at[i + 3] as number) + (piece.book.at[i + 5] as number)) / 3);
-      if (Math.hypot(cx - flat.x, cz - flat.z) < reach) near.add(f);
-    }
-    const grip: Grip = { slot, bench, pin, marker, face, flat, seeds, near, target: new Vector3(pin.x, pin.y, pin.z), lift: 0, carried: false, peeled: false, fromAbove: hit.fromAbove };
+    const grip: Grip = { slot, bench, pin, marker, face, flat, seeds, target: new Vector3(pin.x, pin.y, pin.z), lift: 0, carried: false, peeled: false, fromAbove: hit.fromAbove, lay: null, flap: new Set() };
     this.grips.push(grip);
     this.notify();
     return grip;
@@ -732,7 +738,7 @@ export class FoldLab {
       return;
     }
     const failure = assessment?.plan.failure;
-    if (failure === 'jammed' || failure === 'layers-cross') this.reportFailure(failure);
+    if (failure === 'layers-cross') this.reportFailure(failure);
     this.letGo(grip);
   }
 
@@ -752,7 +758,8 @@ export class FoldLab {
     const { piece } = grip.bench;
     // The fold follows the hand, not the paper trailing behind it, so what you
     // aim at is what you get, however slow the frame was.
-    const flatNow = piece.worldToFlat(grip.target, this.moving ?? grip.near);
+    const flatNow = readFlat(grip.lay ?? piece.frameOf(piece.lifted), grip.target);
+    this.aimedAt = { x: flatNow.x, z: flatNow.z };
     const guess = guessFold(piece, grip.flat, flatNow);
     if (!guess) return null;
 
@@ -761,23 +768,26 @@ export class FoldLab {
     if (key !== this.planKey || !this.cachedPlan) {
       this.planKey = key;
       this.cachedPlan = piece.book.plan({ line: guess.line, side: guess.side, seeds: grip.seeds, landing });
-      this.moving = this.paperOnSide(piece, guess);
     }
     const plan = this.cachedPlan;
-    return { guess, plan, landing, reachable: !plan.failure && guess.miss < SNAP_RADIUS };
+    const reachable = !plan.failure && guess.miss < SNAP_RADIUS;
+    // Only a fold the hand is bringing the paper to. A hand wheeled up is holding paper
+    // up, as when opening a wing, and lifting for a fold there would break the wing apart.
+    if (grip.carried && !this.completed) {
+      if (reachable && grip.lift < HOLDING_UP) this.liftFold(grip, plan.moved, guess.line, landing.kind === 'under');
+      else if (grip.flap.size > 0) this.liftFold(grip, grip.flap, null, !grip.fromAbove);
+    }
+    return { guess, plan, landing, reachable };
   }
 
-  /** All paper past the fold line. It is in motion, so it cannot locate the sheet. */
-  private paperOnSide(piece: SheetPiece, guess: FoldGuess): Set<number> {
-    const { at, faces } = piece.book;
-    const moving = new Set(piece.lifted);
-    for (const f of faces) {
-      const i = f * 6;
-      const x = ((at[i] as number) + (at[i + 2] as number) + (at[i + 4] as number)) / 3;
-      const z = ((at[i + 1] as number) + (at[i + 3] as number) + (at[i + 5] as number)) / 3;
-      if (sideOf(guess.line, x, z) * guess.side > 0) moving.add(f);
-    }
-    return moving;
+  /** The hand now holds this paper: what a fold will move, bending along its line, or its own flap. */
+  private liftFold(grip: Grip, paper: ReadonlySet<number>, line: MirrorLine | null, under: boolean): void {
+    const { bench } = grip;
+    const { lifted } = bench.piece;
+    if (lifted.size === paper.size && [...paper].every((f) => lifted.has(f))) return;
+    bench.piece.liftFor(paper, line, under);
+    grip.peeled = true;
+    this.regrip(bench);
   }
 
   private landingFor(height: number): Landing {
@@ -798,7 +808,7 @@ export class FoldLab {
       return;
     }
     const { piece } = grip.bench;
-    const frame = piece.frameOf(this.moving ?? grip.near);
+    const frame = grip.lay ?? piece.frameOf(piece.lifted);
     const [from, to] = lineAcrossSheet(piece, assessment.guess.line);
     const toWorld = (p: { x: number; z: number }) => {
       const out = new Float64Array(3);
@@ -917,16 +927,23 @@ export class FoldLab {
     return this.faceDown ? { ...definition, top: definition.bottom, bottom: definition.top } : definition;
   }
 
-  reset(definition = this.definition, faceDown = false): void {
+  /** A fresh sheet, of the chosen shape. */
+  private blank(): SheetPiece {
+    const definition = this.dressed();
+    return new SheetPiece(definition, blankBook(definition.cells, this.square ? 'square' : this.paper));
+  }
+
+  reset(definition = this.definition, faceDown = false, square = false): void {
     this.definition = definition;
     this.faceDown = faceDown;
+    this.square = square;
     this.clearBenches();
     this.history.length = 0;
     this.log = [];
     this.recipe = null;
     this.autoplay = false;
     this.completed = false;
-    this.addBench(new SheetPiece(this.dressed()));
+    this.addBench(this.blank());
     this.setMessage(`A fresh sheet, ${definition.size / definition.cells} m between fold lines.`);
   }
 
@@ -936,6 +953,13 @@ export class FoldLab {
 
   get cells(): number {
     return this.definition.cells;
+  }
+
+  /** Chooses the shape fresh sheets start as, and lays one out. */
+  setPaper(paper: PaperShape): void {
+    this.paper = paper;
+    this.reset();
+    this.setMessage(paper === 'a4' ? 'A fresh A4 sheet: 7 by 10 m.' : 'A fresh square sheet: 10 by 10 m.');
   }
 
   /** Tuning only: the paper's feel is meant to be one fixed value. */
@@ -956,7 +980,7 @@ export class FoldLab {
   /** Lays out a recipe, ready to step through. */
   openRecipe(id: string): void {
     const recipe = this.recipeById(id);
-    this.reset(this.definition, recipe.faceDown);
+    this.reset(this.definition, recipe.faceDown, true);
     this.recipe = { recipe, next: 0 };
     this.setMessage(recipe.source);
   }
@@ -1227,12 +1251,13 @@ export class FoldLab {
       joints: (first?.piece.joints ?? []).map((joint) => ({ faces: joint.faces.size, angle: joint.angle, partner: joint.partner, mirrored: joint.mirrored })),
       turning: this.posing?.joint ?? -1,
       cellMetres: this.definition.size / this.definition.cells,
+      paper: this.paper,
       floppiness: this.definition.floppiness,
       height: this.height(),
       lowest: this.benches.reduce((low, b) => Math.min(low, b.view.lowest), Infinity),
       hoverFaces: this.hover?.size ?? 0,
       liftedFaces: this.benches.reduce((sum, b) => sum + b.piece.lifted.size, 0),
-      held: active ? { x: active.pin.heldX, y: active.pin.heldY, z: active.pin.heldZ, ready: assessment?.reachable ?? false } : null,
+      held: active ? { x: active.pin.heldX, y: active.pin.heldY, z: active.pin.heldZ, ready: assessment?.reachable ?? false, from: active.flat, to: this.aimedAt } : null,
       recipe: this.recipe,
     };
   }
@@ -1249,6 +1274,5 @@ const FAILURE_TEXT: Record<FoldFailure, string> = {
   'not-a-grid-line': 'That is not on the grid.',
   'nothing-moves': 'Nothing on that side to fold.',
   'nothing-stays': 'All the paper would move.',
-  jammed: 'Jammed: another layer is pinning that paper down.',
   'layers-cross': 'Layers would have to pass through each other.',
 };

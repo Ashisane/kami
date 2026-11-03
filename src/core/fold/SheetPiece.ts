@@ -23,6 +23,8 @@ export class SheetPiece {
   soft: SoftSheet;
   /** Paper lifted off its stacks right now. */
   private flaps: ReadonlySet<number>[] = [];
+  /** The line each flap is being folded along, if a fold is lined up for it. */
+  private bends: (MirrorLine | null)[] = [];
   /** Set once the paper is marked complete: it is then stiff plates on hinges. */
   private finished: { joints: Joint[]; stance: Stance; lying: Stance } | null = null;
 
@@ -87,7 +89,8 @@ export class SheetPiece {
 
   /** Replaces the cloth. Pins hold triangles that no longer exist, so their owners must re-grip. */
   private rebuild(positions: (mesh: ReturnType<typeof buildSoftMesh>) => Float64Array): void {
-    const mesh = buildSoftMesh(this.book, this.definition.size, this.flaps);
+    if (this.bends.length !== this.flaps.length) this.bends = this.flaps.map(() => null);
+    const mesh = buildSoftMesh(this.book, this.definition.size, this.flaps, this.bends);
     this.soft = new SoftSheet(mesh, this.solverSettings(), positions(mesh));
     this.revision++;
   }
@@ -101,6 +104,7 @@ export class SheetPiece {
 
     this.book.fold(request);
     this.flaps = [];
+    this.bends = [];
     this.previousCorners = before;
     this.lastSwing = swing ? { line: request.line, moved: plan.moved } : null;
 
@@ -142,6 +146,7 @@ export class SheetPiece {
     const failure = applyOpen(this.book, this.definition.size, step);
     if (failure) return failure;
     this.flaps = [];
+    this.bends = [];
     this.rebuild((mesh) => {
       const out = new Float64Array(mesh.vertexCount * 3);
       const landing = new Float64Array(3);
@@ -193,16 +198,19 @@ export class SheetPiece {
 
   /** The flat position, in metres, that a world point sits over. */
   worldToFlat(point: { x: number; y: number; z: number }, excluded: ReadonlySet<number>): { x: number; z: number; height: number } {
+    return readFlat(this.frameOf(excluded), point);
+  }
+
+  /** Fits a frame to the paper as it lies now, minus some, to read points against later. */
+  frameNow(excluded: ReadonlySet<number>): (x: number, z: number, out: Float64Array) => void {
     const frame = this.frameOf(excluded);
     const origin = new Float64Array(3), ax = new Float64Array(3), az = new Float64Array(3);
     frame(0, 0, origin);
     frame(1, 0, ax);
     frame(0, 1, az);
-    const ux = (ax[0] as number) - (origin[0] as number), uy = (ax[1] as number) - (origin[1] as number), uz = (ax[2] as number) - (origin[2] as number);
-    const vx = (az[0] as number) - (origin[0] as number), vy = (az[1] as number) - (origin[1] as number), vz = (az[2] as number) - (origin[2] as number);
-    const dx = point.x - (origin[0] as number), dy = point.y - (origin[1] as number), dz = point.z - (origin[2] as number);
-    const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
-    return { x: dx * ux + dy * uy + dz * uz, z: dx * vx + dy * vy + dz * vz, height: -(dx * nx + dy * ny + dz * nz) };
+    return (x, z, out) => {
+      for (let i = 0; i < 3; i++) out[i] = (origin[i] as number) + x * ((ax[i] as number) - (origin[i] as number)) + z * ((az[i] as number) - (origin[i] as number));
+    };
   }
 
   /** Flat paper connected to a face, stopping at every crease. */
@@ -304,17 +312,26 @@ export class SheetPiece {
         }
       }
       for (const stack of book.stacks.values()) {
-        if (!stack.some((f) => staying.has(part[f] as number))) continue;
-        // In from the outside, up to the first layer that stays.
+        // In from the outside. Everything outside the paper that stays swings, and so
+        // does whatever lies on the outside of swinging paper: it is carried, as in a fold.
+        const outside: number[] = [];
+        let innermost = -1;
+        let reachedStaying = false;
         for (let i = 0; i < stack.length; i++) {
           const f = stack[under ? i : stack.length - 1 - i] as number;
           if (lifted.has(f)) continue;
           const p = part[f] as number;
-          if (staying.has(p)) break;
-          if (!swinging.has(p)) {
-            swinging.add(p);
-            grew = true;
+          if (staying.has(p)) {
+            reachedStaying = true;
+            break;
           }
+          outside.push(p);
+          if (swinging.has(p)) innermost = outside.length - 1;
+        }
+        for (const p of reachedStaying ? outside : outside.slice(0, innermost + 1)) {
+          if (swinging.has(p)) continue;
+          swinging.add(p);
+          grew = true;
         }
       }
     }
@@ -396,6 +413,7 @@ export class SheetPiece {
     const before = this.corners();
     const [nx, ny, nz] = this.surfaceUp();
     this.flaps = [...this.flaps, flap];
+    this.bends = [...this.bends, null];
     const lift = CONTACT_GAP * 1.5 * (under ? -1 : 1);
     this.rebuild((mesh) => {
       const out = new Float64Array(mesh.vertexCount * 3);
@@ -411,6 +429,39 @@ export class SheetPiece {
       return out;
     });
     return true;
+  }
+
+  /**
+   * Lifts exactly what a fold would move, bending freely along its line, so a hand
+   * sees the fold it is lining up. With no line, it lifts paper as an ordinary flap. Without this, paper held down elsewhere, as under a
+   * Nakamura lock, could only lift as a patch, and pulling it dragged the whole craft.
+   */
+  liftFor(moved: ReadonlySet<number>, line: MirrorLine | null, under: boolean): void {
+    const before = this.corners();
+    const was = this.lifted;
+    const [nx, ny, nz] = this.surfaceUp();
+    const lift = CONTACT_GAP * 1.5 * (under ? -1 : 1);
+    this.flaps = [moved];
+    this.bends = [line];
+    this.rebuild((mesh) => {
+      const out = new Float64Array(mesh.vertexCount * 3);
+      const placed = new Uint8Array(mesh.vertexCount);
+      const place = (f: number, rise: number) => {
+        for (let k = 0; k < 3; k++) {
+          const v = mesh.cornerVertex[f * 3 + k] as number;
+          if (placed[v]) continue;
+          placed[v] = 1;
+          out[v * 3] = (before[f * 9 + k * 3] as number) + nx * rise;
+          out[v * 3 + 1] = (before[f * 9 + k * 3 + 1] as number) + ny * rise;
+          out[v * 3 + 2] = (before[f * 9 + k * 3 + 2] as number) + nz * rise;
+        }
+      };
+      // Paper on the stack keeps its place first: a strip dropping back lands on it.
+      for (const f of this.book.faces) if (!moved.has(f) && !was.has(f)) place(f, 0);
+      for (const f of this.book.faces) if (moved.has(f)) place(f, was.has(f) ? 0 : lift);
+      for (const f of this.book.faces) place(f, 0);
+      return out;
+    });
   }
 
   /** True while paper is lifted: someone has it in hand. */
@@ -513,11 +564,13 @@ export class SheetPiece {
   complete(): readonly Joint[] {
     const lying = this.lyingStance();
     this.flaps = [];
+    this.bends = [];
     const joints = this.findJoints();
     // Pairs go first: a plane's wings are what say which way up it stands.
     const lead = joints.find((joint) => joint.partner >= 0) ?? joints[0];
     this.finished = { joints, lying, stance: lead ? standOn(lying, lead) : lying };
     this.flaps = joints.map((joint) => joint.faces);
+    this.bends = joints.map(() => null);
     this.rebuild((mesh) => {
       const out = new Float64Array(mesh.vertexCount * 3);
       poseCraft(mesh, joints, joints.map(() => 0), (this.finished as { stance: Stance }).stance, this.definition.thickness, out);
@@ -533,6 +586,7 @@ export class SheetPiece {
     const { lying } = this.finished;
     this.finished = null;
     this.flaps = [];
+    this.bends = [];
     this.rebuild((mesh) => {
       const out = new Float64Array(mesh.vertexCount * 3);
       poseCraft(mesh, [], [], lying, this.definition.thickness, out);
@@ -622,6 +676,7 @@ export class SheetPiece {
     if (flap.size === 0) return;
     const before = this.corners();
     this.flaps = [];
+    this.bends = [];
     this.previousCorners = before;
     this.lastSwing = null;
     this.rebuild((mesh) => {
@@ -645,6 +700,7 @@ export class SheetPiece {
   cut(line: MirrorLine, from: number, to: number): SheetPiece[] {
     const before = this.corners();
     this.flaps = [];
+    this.bends = [];
     const books = this.book.cutAlong(line, from, to);
     const pieces = books.map((book) => {
       if (book === this.book) return this;
@@ -679,6 +735,19 @@ export class SheetPiece {
   harden(solid: boolean): void {
     this.soft.harden(solid);
   }
+}
+
+/** The flat position, in metres, that a world point sits over, against a frame. */
+export function readFlat(frame: (x: number, z: number, out: Float64Array) => void, point: { x: number; y: number; z: number }): { x: number; z: number; height: number } {
+  const origin = new Float64Array(3), ax = new Float64Array(3), az = new Float64Array(3);
+  frame(0, 0, origin);
+  frame(1, 0, ax);
+  frame(0, 1, az);
+  const ux = (ax[0] as number) - (origin[0] as number), uy = (ax[1] as number) - (origin[1] as number), uz = (ax[2] as number) - (origin[2] as number);
+  const vx = (az[0] as number) - (origin[0] as number), vy = (az[1] as number) - (origin[1] as number), vz = (az[2] as number) - (origin[2] as number);
+  const dx = point.x - (origin[0] as number), dy = point.y - (origin[1] as number), dz = point.z - (origin[2] as number);
+  const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+  return { x: dx * ux + dy * uy + dz * uz, z: dx * vx + dy * vy + dz * vz, height: -(dx * nx + dy * ny + dz * nz) };
 }
 
 /** Where a point lands if folded across a line, in metres on the flat sheet. */
