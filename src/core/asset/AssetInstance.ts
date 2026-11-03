@@ -1,5 +1,7 @@
 import { AnimationMixer, LoopOnce, LoopRepeat, Mesh } from 'three';
 import type { AnimationAction, BufferGeometry, Object3D } from 'three';
+import { paper } from '../paper/paperLibrary';
+import type { StockId } from '../paper/stocks';
 import { loadGltfModel } from './gltf';
 import type { AssetDefinition, BuiltModel } from './types';
 
@@ -71,6 +73,15 @@ export class AssetInstance {
     const node = this.node(spec.node);
     if (!node) throw new Error(`${this.definition.id} socket "${name}" points at missing node "${spec.node}".`);
     return node;
+  }
+
+  /** Gives every mesh in a declared paint slot another paper stock. */
+  paint(slot: string, stock: StockId): void {
+    if (!this.definition.paints?.[slot]) throw new Error(`${this.definition.id} declares no paint slot "${slot}".`);
+    const material = paper(stock);
+    this.root.traverse((object) => {
+      if (object instanceof Mesh && object.userData['paint'] === slot) object.material = material;
+    });
   }
 
   update(dt: number): void {

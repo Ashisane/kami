@@ -110,6 +110,8 @@ repeats, baked textures shared across everything.
 - Never spread a mesh-sized array into a call (`push(...list)`). It overflows the stack.
 - Test what a player sees, not a proxy. A boat "passed" on fold count while flat.
 - Multi-line `node -` heredocs in Bash can fail on quoting. Put edit scripts in a file.
+- Vitest caches transformed modules in `node_modules/.vitest-cache`, glob results
+  included. A new `*.asset.ts` stays missing from the test registry until it is cleared.
 
 ## Writing commits
 

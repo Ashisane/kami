@@ -3,10 +3,12 @@ import { describe, expect, it } from 'vitest';
 import { clip, hinge } from '@/core/anim/clip';
 import { fold, outBack, spring } from '@/core/anim/easing';
 import { Spring } from '@/core/anim/spring';
+import { instantiate } from '@/core/asset/AssetInstance';
 import { getAsset, listAssets } from '@/core/asset/registry';
 import { defineAsset } from '@/core/asset/types';
 import type { BuiltModel } from '@/core/asset/types';
 import { modelStats, validateModel } from '@/core/asset/validate';
+import type { PaperMaterial } from '@/core/paper/PaperMaterial';
 import { rect, sheet, sheetGeometry } from '@/core/paper/sheet';
 
 const errors = (issues: { severity: string; message: string }[]) => issues.filter((i) => i.severity === 'error');
@@ -77,6 +79,23 @@ describe('the contract catches model swaps that would break the game', () => {
   it('rejects an id that does not match its category', () => {
     const wrong = { ...definition, id: 'craft.test' };
     expect(errors(validateModel(wrong, makeModel())).length).toBeGreaterThan(0);
+  });
+
+  it('fails when a declared paint slot has no mesh tagged with it', () => {
+    const painted = { ...definition, paints: { coat: 'The coat.' } };
+    expect(errors(validateModel(painted, makeModel())).map((i) => i.message).join()).toContain('Paint slot "coat"');
+    const model = makeModel();
+    (model.root.getObjectByName('body') as Mesh).userData['paint'] = 'coat';
+    expect(errors(validateModel(painted, model))).toEqual([]);
+  });
+
+  it('paints a slot in another stock, leaving the rest of the model alone', async () => {
+    const instance = await instantiate(getAsset('character.being'));
+    const stockOf = (name: string) => ((instance.node(name) as Mesh).material as PaperMaterial).stockId;
+    instance.paint('body', 'teal');
+    expect(stockOf('torso')).toBe('teal');
+    expect(stockOf('shin_left')).toBe('teal');
+    expect(stockOf('skull')).toBe('washi');
   });
 });
 

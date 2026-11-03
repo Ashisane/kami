@@ -71,6 +71,12 @@ export interface AssetDefinition {
   clips: readonly string[];
   sockets: Readonly<Record<string, SocketSpec>>;
   colliders: readonly ColliderSpec[];
+  /**
+   * Parts a game may give another paper stock, such as each crew member's colour,
+   * by slot name. The model tags every mesh in a slot with `userData.paint`, which
+   * glTF keeps as extras, so a Blender model can declare the same slots.
+   */
+  paints?: Readonly<Record<string, string>>;
   /** Triangle budget. Exceeding it is reported as a contract failure. */
   maxTriangles: number;
   /** Target images under /public/references, shown in the library's reference overlay. */

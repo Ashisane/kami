@@ -110,6 +110,15 @@ export function validateModel(definition: AssetDefinition, model: BuiltModel): C
     }
   }
 
+  const painted = new Set<string>();
+  model.root.traverse((object) => {
+    const slot = object.userData['paint'];
+    if (object instanceof Mesh && typeof slot === 'string') painted.add(slot);
+  });
+  for (const slot of Object.keys(definition.paints ?? {})) {
+    if (!painted.has(slot)) error(`Paint slot "${slot}" has no mesh tagged with it.`);
+  }
+
   const stats = modelStats(model);
   if (stats.triangles > definition.maxTriangles) {
     error(`${stats.triangles} triangles is over the budget of ${definition.maxTriangles}.`);
