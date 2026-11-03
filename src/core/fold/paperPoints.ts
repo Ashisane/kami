@@ -64,12 +64,18 @@ export function worldOf(piece: SheetPiece, point: PaperPoint, out: { x: number; 
   out.z = point.b0 * (x[a + 2] as number) + point.b1 * (x[b + 2] as number) + point.b2 * (x[c + 2] as number);
 }
 
+/** How much nearer folded paper counts as, in metres: by a flap's edge, a hand means the flap. */
+const FOLDED_PULL = 0.2;
+
 /**
- * The paper nearest a point within a reach, preferring the highest layer: what a
- * hand closing there would take hold of. Searches each triangle's closest point.
+ * The paper nearest a point within a reach: what a hand closing there would take
+ * hold of. Folded paper counts as a little nearer, so a hand by a flap's edge takes
+ * the flap, not the single sheet just past it, and of layers lying together the top
+ * one wins. Searches each triangle's closest point.
  */
 export function nearestPaper(piece: SheetPiece, at: { x: number; y: number; z: number }, reach: number): (PaperPoint & { distance: number }) | null {
-  const { tris, triCount } = piece.soft.mesh;
+  const { tris, triCount, triLayers } = piece.soft.mesh;
+  let bestScore = Infinity;
   const x = piece.soft.x;
   let best: (PaperPoint & { distance: number }) | null = null;
   const p = [0, 0, 0], q = [0, 0, 0], r = [0, 0, 0];
@@ -87,9 +93,11 @@ export function nearestPaper(piece: SheetPiece, at: { x: number; y: number; z: n
     const cz = b0 * (p[2] as number) + b1 * (q[2] as number) + b2 * (r[2] as number);
     const distance = Math.hypot(cx - at.x, cy - at.y, cz - at.z);
     if (distance > reach) continue;
+    const score = distance - ((triLayers[t] as number) > 1 ? FOLDED_PULL : 0);
     // Within a few centimetres, layers of one stack tie: the higher one is on top.
-    if (!best || distance < best.distance - 0.03 || (distance < best.distance + 0.03 && cy > highest(piece, best))) {
+    if (!best || score < bestScore - 0.03 || (score < bestScore + 0.03 && cy > highest(piece, best))) {
       best = { tri: t, b0, b1, b2, distance };
+      bestScore = score;
     }
   }
   return best;

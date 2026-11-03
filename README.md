@@ -8,7 +8,9 @@ npm install
 npm run dev
 ```
 
-Opens the Fold Lab at http://localhost:5173.
+Opens the Fold Lab at http://localhost:5173. The in-world experiment, three
+beings handling the sheet, is at http://localhost:5173/play.html. Its keys and
+rules are in `docs/PLAY.md`.
 
 | In the Fold Lab | Action |
 | --- | --- |

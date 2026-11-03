@@ -318,7 +318,10 @@ export class GameSim {
       const was = flatSide(piece, opening.line, grip.flat.x, grip.flat.z);
       grip.unfolding = Math.sign(now) !== Math.sign(was) && now !== 0;
     }
-    const lift = grip.unfolding ? liftFor(null, 0, grip.flap, grip.under) : liftFor(grip.aim, being.handHeight - RULES.handRest, grip.flap, grip.under);
+    // Held by its edge, a flap turns freely on its crease, as it opens; once another fold
+    // is lined up, exactly what that fold moves lifts instead.
+    const folding = !grip.unfolding && grip.aim?.reachable;
+    const lift = opening && !folding ? { paper: opening.faces, line: opening.line, under: grip.under } : liftFor(grip.aim, being.handHeight - RULES.handRest, grip.flap, grip.under);
     if (applyLift(piece, lift)) this.regrip(piece);
   }
 
@@ -334,7 +337,7 @@ export class GameSim {
         return;
       }
       const opened = grip.opening.faces;
-      const plan = piece.unfold(grip.face, grip.under);
+      const plan = piece.unfold(grip.face, grip.under, true);
       if (!plan || plan.failure) {
         this.emit('refuse', being, at, REFUSALS[plan?.failure ?? 'covered']);
         return;
@@ -443,8 +446,10 @@ export class GameSim {
         if (back > RULES.heldBack) {
           being.x -= ux * back;
           being.z -= uz * back;
-          being.vx *= 0.5;
-          being.vz *= 0.5;
+          // Like a wall: what was carrying it away is gone, so it does not jerk the paper again next step.
+          const outward = Math.max(0, being.vx * ux + being.vz * uz);
+          being.vx -= ux * outward;
+          being.vz -= uz * outward;
           being.heldBack = back;
           being.taut = RULES.tautMemory;
         }

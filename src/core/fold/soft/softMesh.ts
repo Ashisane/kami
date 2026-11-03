@@ -39,7 +39,7 @@ export interface SoftMesh {
   hingeLayers: Float64Array;
   /** 1 where a hinge is a made crease, which wants to stay shut. */
   hingeFolded: Uint8Array;
-  /** 1 where paper is being folded right now: it turns freely there, like a hinge. */
+  /** 1 where paper is being folded or opened out right now: it turns freely there, like a hinge. */
   hingeLoose: Uint8Array;
   /** 1 where flat paper was once creased and opened out: it bends there easily. */
   hingeCreased: Uint8Array;
@@ -273,7 +273,8 @@ export function buildSoftMesh(
         hingeLayerList.push(((triLayers[s] as number) + (triLayers[t] as number)) / 2);
         hingeFoldedList.push(folded ? 1 : 0);
         const flap = Math.max(flapS, flapT);
-        hingeLooseList.push(!folded && flapS !== flapT && onBend(a, bends[flap]) && onBend(b, bends[flap]) ? 1 : 0);
+        // Paper turning on a line a hand is working, folding it or opening a crease out again.
+        hingeLooseList.push(flapS !== flapT && onBend(a, bends[flap]) && onBend(b, bends[flap]) ? 1 : 0);
         hingeCreasedList.push(!folded && creasedPairs.has(pair) ? 1 : 0);
       }
     }

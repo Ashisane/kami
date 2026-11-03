@@ -65,7 +65,8 @@ src/core/        Engine. Must never import from library/ or game code.
   sim/           Fixed-step clock
 src/assets/      One `*.asset.ts` per model, one `*.sheet.ts` per sheet. Auto-registered.
 src/library/     The Asset Library app: stage, Fold Lab, panels, styles.
-tools/           capture.mjs and labcheck.mjs, the eyes of this project.
+src/game/        The in-world experiment: sim (no three.js), input, view. See docs/PLAY.md.
+tools/           capture.mjs, labcheck.mjs and playcheck.mjs, the eyes of this project.
 tests/           Contract and motion tests.
 docs/            Art direction, asset pipeline, roadmap.
 ```
@@ -76,6 +77,7 @@ docs/            Art direction, asset pipeline, roadmap.
 npm run dev          Asset Library at localhost:5173
 npm run verify       Typecheck, tests, screenshots, GLB round trip, benchmark
 npm run check:lab    Plays the Fold Lab with a real mouse
+npm run check:play   Plays the in-world experiment (localhost:5173/play.html) with real keys
 npm run capture -- --suite smoke
 npm run capture -- --asset <id> --clip <name> --time 0.6 --camera side --bare
 npm run capture -- --stock kraft --zoom 4 --lighting golden --bare

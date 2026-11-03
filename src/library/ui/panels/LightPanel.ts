@@ -2,7 +2,7 @@ import { LIGHTING_PRESETS } from '@/core/render/lighting';
 import type { LightingPreset } from '@/core/render/lighting';
 import type { Quality } from '@/core/render/RenderPipeline';
 import type { LibraryContext } from '../../context';
-import type { Surface } from '../../stage/CuttingMat';
+import type { Surface } from '@/core/render/CuttingMat';
 import { colorField, copyButton, round, section, segmented, slider, toggle } from '../controls';
 import { h } from '../dom';
 

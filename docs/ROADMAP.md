@@ -8,16 +8,17 @@
 - Capture tool, tests, GLB round trip
 
 - The paper: Fold Book, Soft Sheet, Fold Lab, cut, finished crafts (see `docs/PAPER.md`)
+- In the world: three 1 m beings grab, carry, fold and unfold the sheet (see `docs/PLAY.md`)
 
-## Next: finish the paper
+## Next: hands on the paper
 
-1. Owner plays the Fold Lab by hand and critiques the feel
+1. Owner plays the play page by hand and critiques the feel
 2. Decide how a flat boat opens into a hull
 3. Pick the final grid size from that playtest
 
 ## Then: mechanics
 
-1. Player character blockout, with idle, walk, jump, fold and carry clips
+1. Jump, and a finished being model with its clips
 2. Paper meets the world: a finished craft becomes a physics body
 3. Plane gliding and boat floating
 4. Terrain pieces: ground, cliff edge, water

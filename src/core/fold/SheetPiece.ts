@@ -148,17 +148,7 @@ export class SheetPiece {
     const before = this.corners();
     const table = locked ? this.tableFrame(this.lifted) : null;
     this.rebuild((mesh) => {
-      // Every point stays where it is. Points that now weld meet halfway.
-      const out = new Float64Array(mesh.vertexCount * 3);
-      const count = new Float64Array(mesh.vertexCount);
-      for (const f of this.book.faces) {
-        for (let k = 0; k < 3; k++) {
-          const v = mesh.cornerVertex[f * 3 + k] as number;
-          for (let i = 0; i < 3; i++) out[v * 3 + i] = (out[v * 3 + i] as number) + (before[f * 9 + k * 3 + i] as number);
-          count[v] = (count[v] as number) + 1;
-        }
-      }
-      for (let v = 0; v < mesh.vertexCount; v++) for (let i = 0; i < 3; i++) out[v * 3 + i] = (out[v * 3 + i] as number) / ((count[v] as number) || 1);
+      const out = this.positionsInPlace(mesh, before);
       if (table) this.pressFlat(mesh, out, changed, table);
       return out;
     });
@@ -247,9 +237,10 @@ export class SheetPiece {
   /**
    * Opens the outermost flap at a face back out across the crease it turns on.
    * Returns null if no flap there is free to open: something lies on it, or it is
-   * not folded at all.
+   * not folded at all. `carried` says a hand already brought the flap back out, so
+   * it stays where it is; otherwise it is laid out flat beside the paper it joins.
    */
-  unfold(face: number, under = false): UnfoldPlan | null {
+  unfold(face: number, under = false, carried = false): UnfoldPlan | null {
     const opening = this.jointAt(face, under);
     if (!opening) return null;
     const line = lineOfKey(opening.hinge);
@@ -263,8 +254,26 @@ export class SheetPiece {
     this.bends = [];
     this.previousCorners = before;
     this.lastSwing = { line, moved: opening.faces };
-    this.rebuild((mesh) => this.landedPositions(mesh, opening.faces, before, frame));
+    // A flap a hand carried back out is already about where it lands. Laid out by the
+    // frame of the paper it joins, it would be stretched wherever that paper is held up
+    // or bent, so it stays where the hand put it, and settles.
+    this.rebuild((mesh) => (carried ? this.positionsInPlace(mesh, before) : this.landedPositions(mesh, opening.faces, before, frame)));
     return plan;
+  }
+
+  /** Every point stays where its paper is now. Points that now weld meet halfway. */
+  private positionsInPlace(mesh: ReturnType<typeof buildSoftMesh>, before: Float64Array): Float64Array {
+    const out = new Float64Array(mesh.vertexCount * 3);
+    const count = new Float64Array(mesh.vertexCount);
+    for (const f of this.book.faces) {
+      for (let k = 0; k < 3; k++) {
+        const v = mesh.cornerVertex[f * 3 + k] as number;
+        for (let i = 0; i < 3; i++) out[v * 3 + i] = (out[v * 3 + i] as number) + (before[f * 9 + k * 3 + i] as number);
+        count[v] = (count[v] as number) + 1;
+      }
+    }
+    for (let v = 0; v < mesh.vertexCount; v++) for (let i = 0; i < 3; i++) out[v * 3 + i] = (out[v * 3 + i] as number) / ((count[v] as number) || 1);
+    return out;
   }
 
   /** Where the cloth's points go after paper moved: the rest stays, the moved paper lands flat. */

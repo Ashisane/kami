@@ -24,7 +24,8 @@ import type { Shake } from '@/core/fx/Shake';
 import { SheetView } from '@/core/render/SheetView';
 import { SwingFlap } from '@/core/render/SwingFlap';
 import { FixedStep } from '@/core/sim/FixedStep';
-import { AngleTag, FlapHint, FoldGhost, HeldMarks, LockBrush, PIN_COLOURS, PinMarker, Tether } from './LabMarkers';
+import { FoldGhost, PIN_COLOURS, PinMarker, Tether } from '@/core/render/guides';
+import { AngleTag, FlapHint, HeldMarks, LockBrush } from './LabMarkers';
 
 const MAX_PINS = 3;
 const FOLLOW_RATE = 16;

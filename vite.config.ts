@@ -6,7 +6,12 @@ export default defineConfig({
     alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) },
   },
   server: { port: 5173 },
-  build: { target: 'es2022', chunkSizeWarningLimit: 1200 },
+  build: {
+    target: 'es2022',
+    chunkSizeWarningLimit: 1200,
+    // The Asset Library, and the in-world experiment.
+    rollupOptions: { input: { library: 'index.html', play: 'play.html' } },
+  },
   test: {
     environment: 'node',
     include: ['tests/**/*.test.ts'],

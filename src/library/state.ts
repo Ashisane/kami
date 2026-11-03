@@ -2,7 +2,7 @@ import { LIGHTING_PRESETS } from '@/core/render/lighting';
 import type { LightingPreset } from '@/core/render/lighting';
 import type { Quality } from '@/core/render/RenderPipeline';
 import type { StockId } from '@/core/paper/stocks';
-import type { Surface } from './stage/CuttingMat';
+import type { Surface } from '@/core/render/CuttingMat';
 import type { ViewMode } from './stage/LibraryStage';
 
 export type Selection = { kind: 'sheet'; id: string } | { kind: 'asset'; id: string } | { kind: 'stock'; id: StockId };
