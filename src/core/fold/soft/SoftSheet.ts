@@ -155,10 +155,9 @@ export class SoftSheet {
 
   private applyStiffness(): void {
     const { floppiness } = this.settings;
-    const { hingeFolded, hingeLayers, hingeLoose } = this.mesh;
+    const { hingeFolded, hingeLayers } = this.mesh;
     for (let h = 0; h < this.hingeCompliance.length; h++) {
-      // Where paper is being folded, it bends like one loose sheet, however thick.
-      const layers = hingeLoose[h] ? 1 : (hingeLayers[h] as number);
+      const layers = hingeLayers[h] as number;
       // A crease is a line of weakness: thicker paper resists it only a little.
       this.hingeCompliance[h] = hingeFolded[h] ? CREASE_COMPLIANCE / layers : (BEND_COMPLIANCE * floppiness) / layers ** STACK_STIFFENING;
     }
@@ -341,6 +340,10 @@ export class SoftSheet {
     const count = hinges.length / 4;
     const inverseStep = 1 / (h * h);
     for (let n = 0; n < count; n++) {
+      // Paper being folded turns freely on the line, like a hinge. Springing back
+      // towards flat there was far stronger than paper's weight, so a fold held near
+      // its landing flipped the paper on the other side of the line up to meet it.
+      if (hingeLoose[n]) continue;
       const ia = hinges[n * 4] as number, ib = hinges[n * 4 + 1] as number, ic = hinges[n * 4 + 2] as number, id = hinges[n * 4 + 3] as number;
       const a = ia * 3, b = ib * 3, c = ic * 3, d = id * 3;
       const ex = (x[b] as number) - (x[a] as number), ey = (x[b + 1] as number) - (x[a + 1] as number), ez = (x[b + 2] as number) - (x[a + 2] as number);
@@ -369,7 +372,7 @@ export class SoftSheet {
         + wc * (gcx * gcx + gcy * gcy + gcz * gcz) + wd * (gdx * gdx + gdy * gdy + gdz * gdz);
       // Past the bend limit the edge stops dead, instead of springing softly.
       const bend = angle - (this.hingeRest[n] as number);
-      const overLimit = !hingeFolded[n] && !hingeLoose[n] && Math.abs(bend) > BEND_LIMIT;
+      const overLimit = !hingeFolded[n] && Math.abs(bend) > BEND_LIMIT;
       const error = overLimit ? bend - Math.sign(bend) * BEND_LIMIT : bend;
       const softness = overLimit ? 0 : (this.hingeCompliance[n] as number) * inverseStep;
       const lambda = -error / (weight + softness);

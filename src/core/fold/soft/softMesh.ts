@@ -34,7 +34,7 @@ export interface SoftMesh {
   hingeLayers: Float64Array;
   /** 1 where a hinge is a made crease, which wants to stay shut. */
   hingeFolded: Uint8Array;
-  /** 1 where paper is being folded right now: it bends freely there, with no minimum radius. */
+  /** 1 where paper is being folded right now: it turns freely there, like a hinge. */
   hingeLoose: Uint8Array;
   /** Which triangle each book face belongs to, by face id; -1 if not in this piece. */
   faceTri: Int32Array;
@@ -169,6 +169,20 @@ export function buildSoftMesh(book: FoldBook, size: number, flaps: readonly Read
     for (const g of group) faceTri[g] = t;
   });
 
+  // Two triangles are joined only where a layer of one runs on into a layer of the
+  // other. Paper lifted for a fold shares the line's points with the layer it lay
+  // on, through the stack beside them, but no crease joins those two. Treated as a
+  // crease, that line glued the layer under a lifting flap to it, and up it came.
+  const joined = new Set<number>();
+  for (const f of book.faces) {
+    for (let k = 0; k < 3; k++) {
+      const g = neighbour[f * 3 + k] as number;
+      if (g < 0 || book.edgeBlocked(f, k)) continue;
+      const s = faceTri[f] as number, t = faceTri[g] as number;
+      if (s >= 0 && t >= 0 && s !== t) joined.add(Math.min(s, t) * triCount + Math.max(s, t));
+    }
+  }
+
   // Edges and hinges come from the merged triangles.
   const edgeTris = new Map<number, number[]>();
   for (let t = 0; t < triCount; t++) {
@@ -218,6 +232,7 @@ export function buildSoftMesh(book: FoldBook, size: number, flaps: readonly Read
       for (let j = i + 1; j < list.length; j++) {
         const s = list[i] as number;
         const t = list[j] as number;
+        if (!joined.has(Math.min(s, t) * triCount + Math.max(s, t))) continue;
         const wingS = opposite(s, a, b), wingT = opposite(t, a, b);
         const folded = sameSide(a, b, wingS, wingT);
         const flapS = groupFlap[s] as number, flapT = groupFlap[t] as number;

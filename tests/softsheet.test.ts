@@ -201,6 +201,45 @@ describe('folded paper in the solver', () => {
     expect(widest).toBeLessThan(0.6);
   });
 
+  it('folds only the top layer, leaving the one under it on the table', () => {
+    const piece = new SheetPiece(sheet);
+    foldAll(piece, line('x', 5), 1);
+    run(piece, 20);
+    const { book } = piece;
+    // The top layer's free edge now lies along x = 0. Fold just that layer back, on x = 2.5.
+    const edge = book.faces.find((f) => book.flipped[f] === 1 && (book.at[f * 6] as number) <= 1 && Math.abs((book.at[f * 6 + 1] as number) - m(5)) <= m(0.5)) as number;
+    const fold = line('x', 2.5);
+    const plan = book.plan({ line: fold, side: -1, seeds: [edge] });
+    expect(plan.failure).toBeNull();
+    expect([...plan.moved].every((f) => book.flipped[f] === 1)).toBe(true);
+    piece.liftFor(plan.moved, fold, false);
+
+    const base = book.faces.filter((f) => book.flipped[f] === 0);
+    const before = piece.corners();
+    const { soft } = piece;
+    const hand = soft.addPin(soft.mesh.faceTri[edge] as number, 1 / 3, 1 / 3, 1 / 3);
+    const start = hand.x;
+    // Up and over to where the edge lands, then held there.
+    for (let i = 1; i <= 120; i++) {
+      const t = Math.min(1, i / 80);
+      hand.x = start + t * 2 * (-2.5 - start);
+      hand.y = 0.25 + Math.sin(t * Math.PI) * 2;
+      piece.step(DT);
+    }
+    const now = piece.corners();
+    let rose = 0, slid = 0;
+    for (const f of base) {
+      for (let k = 0; k < 3; k++) {
+        const o = f * 9 + k * 3;
+        rose = Math.max(rose, now[o + 1] as number);
+        slid = Math.max(slid, Math.hypot((now[o] as number) - (before[o] as number), (now[o + 2] as number) - (before[o + 2] as number)));
+      }
+    }
+    console.log('the layer under a folded top layer rises', rose.toFixed(2), 'm and slides', slid.toFixed(2), 'm');
+    expect(rose).toBeLessThan(0.1);
+    expect(slid).toBeLessThan(0.1);
+  });
+
   it('turns a plane\'s wing on its fold, not on a small lock crease', () => {
     let piece = new SheetPiece(sheet);
     const plane = RECIPES.find((r) => r.id === 'plane') as Recipe;

@@ -50,8 +50,10 @@ for floppy paper, where they work very well.
    crease sits half a metre off its middle.
    The hand is read against the paper as it lay when the pull began. Paper being
    pulled bends and rolls, and refitting to it each frame misread the hand by metres.
-   Once the hand brings paper to a fold, exactly what it would move lifts, bending
-   freely along the line, so the hand sees the fold it is making.
+   Once the hand brings paper to a fold, exactly what it would move lifts, turning
+   freely on the line like a hinge, so the hand sees the fold it is making. A spring
+   back towards flat there was far stronger than paper's weight, and flipped the
+   paper beyond the line up to meet the hand.
 4. Dropping the pin (click it, or Space) is the one action that creases paper.
    `FoldBook.plan` refuses anything impossible.
 5. `SheetPiece.fold` rebuilds the cloth, and layers on a site merge into one
@@ -100,6 +102,11 @@ becomes a hinge with a rest angle of 180 degrees, so it wants to stay closed. A
 crease is a line of weakness, so it stiffens far less with thickness than flat paper.
 That is why a pin can open a wing when the body is pinned, and why it falls shut when
 let go. With nothing pinning the body, pulling a wing lifts the whole plane.
+
+Paper is joined only where it runs on into other paper. A layer lifted for a fold
+shares the line's points with the layer it lay on, through the stack beside them,
+but nothing joins those two. Treated as a crease, that line glued them, and folding
+a sheet's top layer back lifted the layer under it 3.2 m. It now stays within 1 cm.
 
 ## Flaps
 
