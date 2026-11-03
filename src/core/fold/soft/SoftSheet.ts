@@ -56,6 +56,8 @@ export interface Pin {
 const BEND_COMPLIANCE = 0.02;
 /** A made crease holds far harder than flat paper, so a fold stays shut. */
 const CREASE_COMPLIANCE = 0.0015;
+/** How much more easily paper bends along a crease that was opened out again. */
+const OPENED_CREASE_EASE = 6;
 /**
  * The sharpest an uncreased edge can bend. This gives paper a minimum bend
  * radius: it rolls where cloth would crumple, which is what stops it folding
@@ -209,11 +211,12 @@ export class SoftSheet {
 
   private applyStiffness(): void {
     const { floppiness } = this.settings;
-    const { hingeFolded, hingeLayers } = this.mesh;
+    const { hingeFolded, hingeLayers, hingeCreased } = this.mesh;
     for (let h = 0; h < this.hingeCompliance.length; h++) {
       const layers = hingeLayers[h] as number;
       // A crease is a line of weakness: thicker paper resists it only a little.
-      this.hingeCompliance[h] = hingeFolded[h] ? CREASE_COMPLIANCE / layers : (BEND_COMPLIANCE * floppiness) / layers ** STACK_STIFFENING;
+      const flat = (BEND_COMPLIANCE * floppiness) / layers ** STACK_STIFFENING;
+      this.hingeCompliance[h] = hingeFolded[h] ? CREASE_COMPLIANCE / layers : hingeCreased[h] ? flat * OPENED_CREASE_EASE : flat;
     }
   }
 
@@ -465,7 +468,7 @@ export class SoftSheet {
   private solveHinges(h: number): void {
     const { hinges } = this.mesh;
     const { x, w } = this;
-    const { hingeFolded, hingeLoose } = this.mesh;
+    const { hingeFolded, hingeLoose, hingeCreased } = this.mesh;
     const count = hinges.length / 4;
     const inverseStep = 1 / (h * h);
     for (let n = 0; n < count; n++) {
@@ -503,7 +506,8 @@ export class SoftSheet {
       if (weight === 0) continue;
       // Past the bend limit the edge stops dead, instead of springing softly.
       const bend = angle - (this.hingeRest[n] as number);
-      const overLimit = !hingeFolded[n] && Math.abs(bend) > BEND_LIMIT;
+      // An opened crease folds sharp again easily, so it has no minimum radius.
+      const overLimit = !hingeFolded[n] && !hingeCreased[n] && Math.abs(bend) > BEND_LIMIT;
       const error = overLimit ? bend - Math.sign(bend) * BEND_LIMIT : bend;
       const softness = overLimit ? 0 : (this.hingeCompliance[n] as number) * inverseStep;
       const lambda = -error / (weight + softness);

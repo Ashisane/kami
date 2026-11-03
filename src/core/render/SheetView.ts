@@ -1,8 +1,8 @@
-import { BufferAttribute, BufferGeometry, DynamicDrawUsage, Group, Mesh } from 'three';
+import { BufferAttribute, BufferGeometry, DynamicDrawUsage, Group, LineBasicMaterial, LineSegments, Mesh } from 'three';
 import type { Material } from 'three';
 import type { SheetPiece } from '../fold/SheetPiece';
 import { cornerOffset } from '../fold/soft/softMesh';
-import { paper } from '../paper/paperLibrary';
+import { getStock, paper } from '../paper/paperLibrary';
 
 /**
  * Draws a piece of paper. The solver's triangles are big, so each is drawn as a
@@ -16,6 +16,8 @@ const DETAIL = 4;
 const ROUNDING = 0.75;
 
 const PATCH_POINTS = ((DETAIL + 1) * (DETAIL + 2)) / 2;
+/** How far an opened crease's mark sits off the paper, so it never flickers into it. */
+const MARK_LIFT = 0.002;
 
 /**
  * Marks drawn over the top of locked paper, in a material the caller provides. The
@@ -67,6 +69,9 @@ export class SheetView {
   private rimStart = 0;
   private positions = new BufferAttribute(new Float32Array(0), 3);
   private normals = new BufferAttribute(new Float32Array(0), 3);
+  /** A faint line where a crease was opened out again: drawn vertices, two per segment. */
+  private creaseMarks = new LineSegments(new BufferGeometry(), new LineBasicMaterial({ color: getStock('sumi').color, transparent: true, opacity: 0.32 }));
+  private markVertices = new Int32Array(0);
 
   constructor(
     readonly piece: SheetPiece,
@@ -75,6 +80,8 @@ export class SheetView {
     const { top, bottom, edge } = piece.definition;
     this.materials = [paper(top, { sheet: true }), paper(bottom, { sheet: true }), paper(edge, { sheet: true })];
     if (marks) this.materials.push(marks.material);
+    this.creaseMarks.frustumCulled = false;
+    this.group.add(this.creaseMarks);
   }
 
   /** Draws the piece, leaving out `hidden` faces while they swing as a separate flap. */
@@ -192,6 +199,16 @@ export class SheetView {
     }
     this.positions.needsUpdate = true;
     this.normals.needsUpdate = true;
+
+    const marks = this.creaseMarks.geometry.getAttribute('position') as BufferAttribute | undefined;
+    if (!marks) return;
+    const line = marks.array as Float32Array;
+    const vertices = this.markVertices;
+    for (let i = 0; i < vertices.length; i++) {
+      const v = (vertices[i] as number) * 3;
+      for (let axis = 0; axis < 3; axis++) line[i * 3 + axis] = (out[v + axis] as number) + (normals[v + axis] as number) * MARK_LIFT;
+    }
+    marks.needsUpdate = true;
   }
 
   private build(hidden: ReadonlySet<number>): void {
@@ -233,6 +250,7 @@ export class SheetView {
     const indices: number[][] = [[], [], [], []];
     const { marks } = this;
     const { held } = piece;
+    const markVertices: number[] = [];
 
     /** Which book corner of a face sits on each solver corner. */
     const cornersOn = (f: number, t: number): [number, number, number] => {
@@ -260,6 +278,16 @@ export class SheetView {
       const rest = (c: number, axis: number) => ((book.rest[f * 6 + c * 2 + axis] as number) - book.span / 2) * unit;
       // Locked paper is marked where its top shows.
       const stamp = marks && up && held.has(f) ? marks.stamp(f) : NO_STAMP;
+      // Edges of this face along a crease that lies open, flat, now: they are marked.
+      const opened: [number, number][] = [];
+      if (up) {
+        for (let k = 0; k < 3; k++) {
+          const g = book.neighbour[f * 3 + k] as number;
+          if (g < 0 || !book.edgeCreased(f, k) || book.site(g) === book.site(f)) continue;
+          opened.push([c0 === k ? 0 : c1 === k ? 1 : 2, c0 === (k + 1) % 3 ? 0 : c1 === (k + 1) % 3 ? 1 : 2]);
+        }
+      }
+      const along: number[][] = opened.map(() => []);
       for (let a = DETAIL; a >= 0; a--) {
         const row = DETAIL - a;
         for (let b = 0; b <= row; b++) {
@@ -269,8 +297,13 @@ export class SheetView {
           flip.push(up ? 1 : -1);
           uv.push(w0 * rest(c0, 0) + w1 * rest(c1, 0) + w2 * rest(c2, 0), w0 * rest(c0, 1) + w1 * rest(c1, 1) + w2 * rest(c2, 1));
           stamps.push(stamp[0], stamp[1], stamp[2]);
+          const steps = [a, b, DETAIL - a - b];
+          opened.forEach(([ka, kb], i) => {
+            if (steps[3 - ka - kb] === 0) (along[i] as number[])[steps[ka] as number] = patch.length - 1;
+          });
         }
       }
+      for (const points of along) for (let i = 0; i < DETAIL; i++) markVertices.push(points[i] as number, points[i + 1] as number);
       const list = indices[slot] as number[];
       const mark = stamp === NO_STAMP ? null : (indices[3] as number[]);
       for (let i = 0; i < PATCH_TRIANGLES.length; i += 3) {
@@ -378,6 +411,10 @@ export class SheetView {
     this.drawHeight = Float32Array.from(height);
     this.drawFlip = Int8Array.from(flip);
     this.rims = Int32Array.from(rims);
+    this.markVertices = Int32Array.from(markVertices);
+    this.creaseMarks.geometry.dispose();
+    this.creaseMarks.geometry = new BufferGeometry();
+    this.creaseMarks.geometry.setAttribute('position', new BufferAttribute(new Float32Array(markVertices.length * 3), 3));
 
     const geometry = new BufferGeometry();
     this.positions = new BufferAttribute(new Float32Array(count * 3), 3);
@@ -410,6 +447,7 @@ export class SheetView {
 
   dispose(): void {
     this.mesh?.geometry.dispose();
+    this.creaseMarks.geometry.dispose();
     this.group.removeFromParent();
   }
 

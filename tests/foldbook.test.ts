@@ -200,6 +200,51 @@ describe('cutting', () => {
   });
 });
 
+describe('unfolding', () => {
+  const sameBook = (a: FoldBook, b: FoldBook) => {
+    expect([...a.at]).toEqual([...b.at]);
+    expect([...a.flipped]).toEqual([...b.flipped]);
+    expect(new Map([...a.stacks].map(([k, s]) => [k, [...s]]))).toEqual(new Map([...b.stacks].map(([k, s]) => [k, [...s]])));
+  };
+
+  it('opens a fold back out to exactly the paper it was', () => {
+    const book = FoldBook.sheet(CELLS);
+    const flat = book.clone();
+    const plan = fold(book, line('x', 5), 1);
+    expect(book.unfold(plan.moved, line('x', 5)).failure).toBeNull();
+    sameBook(book, flat);
+    expect(book.violations()).toBe(0);
+  });
+
+  it('opens only the outer flap of two, back to the paper after the first fold', () => {
+    const book = FoldBook.sheet(CELLS);
+    fold(book, line('x', 5), 1);
+    const once = book.clone();
+    const second = fold(book, line('z', 5), 1, { all: true });
+    expect(second.failure).toBeNull();
+    expect(book.unfold(second.moved, line('z', 5)).failure).toBeNull();
+    sameBook(book, once);
+  });
+
+  it('refuses to open a flap with other paper lying on it', () => {
+    const book = FoldBook.sheet(CELLS);
+    const first = fold(book, line('x', 5), 1);
+    // The second fold lays paper over part of the first flap.
+    fold(book, line('z', 7.5), 1, { all: true });
+    expect(book.planUnfold(first.moved, line('x', 5)).failure).toBe('covered');
+  });
+
+  it('remembers the crease after it is opened out', () => {
+    const book = FoldBook.sheet(CELLS);
+    const plan = fold(book, line('x', 5), 1);
+    book.unfold(plan.moved, line('x', 5));
+    let creased = 0;
+    for (const f of book.faces) for (let k = 0; k < 3; k++) if (book.edgeCreased(f, k)) creased++;
+    // Twenty half-cells along the line, each edge marked on both faces that meet there.
+    expect(creased).toBe(40);
+  });
+});
+
 it('performs a fold quickly enough to preview every frame', () => {
   const book = FoldBook.sheet(CELLS);
   fold(book, line('x', 5), 1);

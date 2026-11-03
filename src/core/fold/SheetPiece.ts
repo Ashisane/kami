@@ -1,6 +1,6 @@
 import type { SheetDefinition } from '../asset/sheetTypes';
 import { FoldBook } from './FoldBook';
-import type { FoldFailure, FoldPlan, FoldRequest } from './FoldBook';
+import type { FoldFailure, FoldPlan, FoldRequest, UnfoldPlan } from './FoldBook';
 import { applyOpen } from './recipes';
 import type { OpenStep } from './recipes';
 import type { ReshapeFailure } from './reshape';
@@ -235,36 +235,65 @@ export class SheetPiece {
     this.lastSwing = swing ? { line: request.line, moved: plan.moved } : null;
 
     this.rebuild((mesh) => {
-      const out = new Float64Array(mesh.vertexCount * 3);
-      const weight = new Float64Array(mesh.vertexCount);
-      // Whatever did not move stays exactly where it was.
-      for (const f of this.book.faces) {
-        if (plan.moved.has(f)) continue;
-        for (let k = 0; k < 3; k++) {
-          const v = mesh.cornerVertex[f * 3 + k] as number;
-          out[v * 3] = (out[v * 3] as number) + (before[f * 9 + k * 3] as number);
-          out[v * 3 + 1] = (out[v * 3 + 1] as number) + (before[f * 9 + k * 3 + 1] as number);
-          out[v * 3 + 2] = (out[v * 3 + 2] as number) + (before[f * 9 + k * 3 + 2] as number);
-          weight[v] = (weight[v] as number) + 1;
-        }
-      }
-      // Anything hanging past the rest lands where the sheet's flat frame puts it.
-      const landing = new Float64Array(3);
-      for (let v = 0; v < mesh.vertexCount; v++) {
-        const w = weight[v] as number;
-        if (w > 0) {
-          out[v * 3] = (out[v * 3] as number) / w;
-          out[v * 3 + 1] = (out[v * 3 + 1] as number) / w;
-          out[v * 3 + 2] = (out[v * 3 + 2] as number) / w;
-        } else {
-          frame(mesh.flat[v * 2] as number, mesh.flat[v * 2 + 1] as number, landing);
-          out.set(landing, v * 3);
-        }
-      }
+      const out = this.landedPositions(mesh, plan.moved, before, frame);
       if (table) this.pressFlat(mesh, out, pressed, table);
       return out;
     });
     return plan;
+  }
+
+  /**
+   * Opens the outermost flap at a face back out across the crease it turns on.
+   * Returns null if no flap there is free to open: something lies on it, or it is
+   * not folded at all.
+   */
+  unfold(face: number, under = false): UnfoldPlan | null {
+    const opening = this.jointAt(face, under);
+    if (!opening) return null;
+    const line = lineOfKey(opening.hinge);
+    const plan = this.book.planUnfold(opening.faces, line);
+    if (plan.failure) return plan;
+    if ([...opening.faces].some((f) => this.holds.has(f))) return { ...plan, failure: 'covered' };
+    const before = this.corners();
+    const frame = this.frameOf(opening.faces);
+    this.book.unfold(opening.faces, line);
+    this.flaps = [];
+    this.bends = [];
+    this.previousCorners = before;
+    this.lastSwing = { line, moved: opening.faces };
+    this.rebuild((mesh) => this.landedPositions(mesh, opening.faces, before, frame));
+    return plan;
+  }
+
+  /** Where the cloth's points go after paper moved: the rest stays, the moved paper lands flat. */
+  private landedPositions(mesh: ReturnType<typeof buildSoftMesh>, moved: ReadonlySet<number>, before: Float64Array, frame: (x: number, z: number, out: Float64Array) => void): Float64Array {
+    const out = new Float64Array(mesh.vertexCount * 3);
+    const weight = new Float64Array(mesh.vertexCount);
+    // Whatever did not move stays exactly where it was.
+    for (const f of this.book.faces) {
+      if (moved.has(f)) continue;
+      for (let k = 0; k < 3; k++) {
+        const v = mesh.cornerVertex[f * 3 + k] as number;
+        out[v * 3] = (out[v * 3] as number) + (before[f * 9 + k * 3] as number);
+        out[v * 3 + 1] = (out[v * 3 + 1] as number) + (before[f * 9 + k * 3 + 1] as number);
+        out[v * 3 + 2] = (out[v * 3 + 2] as number) + (before[f * 9 + k * 3 + 2] as number);
+        weight[v] = (weight[v] as number) + 1;
+      }
+    }
+    // Anything hanging past the rest lands where the sheet's flat frame puts it.
+    const landing = new Float64Array(3);
+    for (let v = 0; v < mesh.vertexCount; v++) {
+      const w = weight[v] as number;
+      if (w > 0) {
+        out[v * 3] = (out[v * 3] as number) / w;
+        out[v * 3 + 1] = (out[v * 3 + 1] as number) / w;
+        out[v * 3 + 2] = (out[v * 3 + 2] as number) / w;
+      } else {
+        frame(mesh.flat[v * 2] as number, mesh.flat[v * 2 + 1] as number, landing);
+        out.set(landing, v * 3);
+      }
+    }
+    return out;
   }
 
   /** Opens a pocket and flattens it a new way. The whole piece moves, so all of it lands afresh. */
@@ -917,6 +946,13 @@ export class SheetPiece {
   harden(solid: boolean): void {
     this.soft.harden(solid);
   }
+}
+
+/** A crease's line from its key: x, z, d (x - z) or s (x + z), then the constant. */
+function lineOfKey(key: string): MirrorLine {
+  const c = Number(key.slice(1));
+  const kind = ({ x: 'x', z: 'z', d: 'diff', s: 'sum' } as const)[key[0] as 'x' | 'z' | 'd' | 's'];
+  return { kind, c };
 }
 
 /** The flat position, in metres, that a world point sits over, against a frame. */

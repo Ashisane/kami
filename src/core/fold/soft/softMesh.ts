@@ -41,6 +41,8 @@ export interface SoftMesh {
   hingeFolded: Uint8Array;
   /** 1 where paper is being folded right now: it turns freely there, like a hinge. */
   hingeLoose: Uint8Array;
+  /** 1 where flat paper was once creased and opened out: it bends there easily. */
+  hingeCreased: Uint8Array;
   /** Which triangle each book face belongs to, by face id; -1 if not in this piece. */
   faceTri: Int32Array;
   /** Which vertex each face corner belongs to: index by face * 3 + corner. */
@@ -197,12 +199,16 @@ export function buildSoftMesh(
   // on, through the stack beside them, but no crease joins those two. Treated as a
   // crease, that line glued the layer under a lifting flap to it, and up it came.
   const joined = new Set<number>();
+  const creasedPairs = new Set<number>();
   for (const f of book.faces) {
     for (let k = 0; k < 3; k++) {
       const g = neighbour[f * 3 + k] as number;
       if (g < 0 || book.edgeBlocked(f, k)) continue;
       const s = faceTri[f] as number, t = faceTri[g] as number;
-      if (s >= 0 && t >= 0 && s !== t) joined.add(Math.min(s, t) * triCount + Math.max(s, t));
+      if (s < 0 || t < 0 || s === t) continue;
+      const pair = Math.min(s, t) * triCount + Math.max(s, t);
+      joined.add(pair);
+      if (book.edgeCreased(f, k)) creasedPairs.add(pair);
     }
   }
 
@@ -224,6 +230,7 @@ export function buildSoftMesh(
   const hingeLayerList: number[] = [];
   const hingeFoldedList: number[] = [];
   const hingeLooseList: number[] = [];
+  const hingeCreasedList: number[] = [];
   /** True if a vertex lies on the line a flap is being folded along. */
   const onBend = (v: number, line: MirrorLine | null | undefined) =>
     !!line && sideOf(line, Math.round((flat[v * 2] as number) / unit + half), Math.round((flat[v * 2 + 1] as number) / unit + half)) === 0;
@@ -255,7 +262,8 @@ export function buildSoftMesh(
       for (let j = i + 1; j < list.length; j++) {
         const s = list[i] as number;
         const t = list[j] as number;
-        if (!joined.has(Math.min(s, t) * triCount + Math.max(s, t))) continue;
+        const pair = Math.min(s, t) * triCount + Math.max(s, t);
+        if (!joined.has(pair)) continue;
         const wingS = opposite(s, a, b), wingT = opposite(t, a, b);
         const folded = sameSide(a, b, wingS, wingT);
         const flapS = groupFlap[s] as number, flapT = groupFlap[t] as number;
@@ -266,6 +274,7 @@ export function buildSoftMesh(
         hingeFoldedList.push(folded ? 1 : 0);
         const flap = Math.max(flapS, flapT);
         hingeLooseList.push(!folded && flapS !== flapT && onBend(a, bends[flap]) && onBend(b, bends[flap]) ? 1 : 0);
+        hingeCreasedList.push(!folded && creasedPairs.has(pair) ? 1 : 0);
       }
     }
   }
@@ -309,6 +318,7 @@ export function buildSoftMesh(
     hingeLayers: Float64Array.from(hingeLayerList),
     hingeFolded: Uint8Array.from(hingeFoldedList),
     hingeLoose: Uint8Array.from(hingeLooseList),
+    hingeCreased: Uint8Array.from(hingeCreasedList),
     faceTri,
     cornerVertex,
     cornerRest,

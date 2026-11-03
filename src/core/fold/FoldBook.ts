@@ -35,6 +35,17 @@ export interface FoldPlan {
   failure: FoldFailure | null;
 }
 
+/** Why a flap cannot be opened: other paper lies on it, or it would pass through paper. */
+export type UnfoldFailure = 'not-a-grid-line' | 'covered' | 'layers-cross';
+
+export interface UnfoldPlan {
+  line: MirrorLine;
+  flap: ReadonlySet<number>;
+  /** Which way it opens: out on top of whatever it lands on, or underneath. */
+  landing: Landing;
+  failure: UnfoldFailure | null;
+}
+
 /** Number of corners and of edges per face. */
 const CORNERS = 3;
 
@@ -51,6 +62,11 @@ export class FoldBook {
   /** The face across each edge, or -1. Edge k runs from corner k to corner k + 1. */
   readonly neighbour: Int32Array;
   cut: Uint8Array;
+  /**
+   * 1 on every edge a fold has ever creased, per face edge. Paper remembers a crease
+   * after it is opened out again, so it shows, and bends there more easily.
+   */
+  creased: Uint8Array;
   /** Site id to face ids, bottom to top. */
   stacks = new Map<number, number[]>();
   /** Each face's height within its stack. */
@@ -67,6 +83,7 @@ export class FoldBook {
     this.at = rest.slice();
     this.flipped = new Uint8Array(this.faceCount);
     this.cut = new Uint8Array(this.faceCount * CORNERS);
+    this.creased = new Uint8Array(this.faceCount * CORNERS);
     this.layer = new Int32Array(this.faceCount);
     this.faces = Array.from({ length: this.faceCount }, (_, i) => i);
     for (const f of this.faces) this.stacks.set(this.site(f), [f]);
@@ -123,6 +140,11 @@ export class FoldBook {
 
   edgeBlocked(f: number, k: number): boolean {
     return this.cut[f * CORNERS + k] === 1;
+  }
+
+  /** True if a fold has ever creased this edge of a face. */
+  edgeCreased(f: number, k: number): boolean {
+    return this.creased[f * CORNERS + k] === 1;
   }
 
   private onSide(line: MirrorLine, side: number, f: number): boolean {
@@ -191,6 +213,36 @@ export class FoldBook {
     return trial.violations() > 0 ? fail('layers-cross') : { request, moved, failure: null };
   }
 
+  /**
+   * Works out how a flap would open back out across the crease it turns on. The
+   * flap must be outermost on one side, with nothing lying on it. It lands on top
+   * of whatever is there, or underneath if only that is possible.
+   */
+  planUnfold(flap: ReadonlySet<number>, line: MirrorLine): UnfoldPlan {
+    const fail = (failure: UnfoldFailure): UnfoldPlan => ({ line, flap, landing: { kind: 'over' }, failure });
+    if (!isMirror(line)) return fail('not-a-grid-line');
+    const outermost = (top: boolean) =>
+      [...flap].every((f) => {
+        const stack = this.stackOf(f);
+        const h = stack.indexOf(f);
+        return (top ? stack.slice(h + 1) : stack.slice(0, h)).every((g) => flap.has(g));
+      });
+    if (!outermost(true) && !outermost(false)) return fail('covered');
+    for (const landing of [{ kind: 'over' }, { kind: 'under' }] as const) {
+      const trial = this.clone();
+      trial.apply(line, flap, landing);
+      if (trial.violations() === 0) return { line, flap, landing, failure: null };
+    }
+    return fail('layers-cross');
+  }
+
+  /** Opens a flap back out, if it can be. Returns the plan, so a caller can see why not. */
+  unfold(flap: ReadonlySet<number>, line: MirrorLine): UnfoldPlan {
+    const plan = this.planUnfold(flap, line);
+    if (!plan.failure) this.apply(line, flap, plan.landing);
+    return plan;
+  }
+
   /** Performs a legal fold. Returns the plan, so a caller can see why one was refused. */
   fold(request: FoldRequest): FoldPlan {
     const plan = this.plan(request);
@@ -199,6 +251,15 @@ export class FoldBook {
   }
 
   private apply(line: MirrorLine, moved: ReadonlySet<number>, landing: Landing): void {
+    // Where moved paper meets paper that stays, on the line, it creases.
+    for (const f of moved) {
+      for (let k = 0; k < CORNERS; k++) {
+        const g = this.neighbour[f * CORNERS + k] as number;
+        if (g < 0 || moved.has(g) || !this.edgeOn(line, f, k)) continue;
+        this.creased[f * CORNERS + k] = 1;
+        for (let j = 0; j < CORNERS; j++) if (this.neighbour[g * CORNERS + j] === f) this.creased[g * CORNERS + j] = 1;
+      }
+    }
     // Lift the moved run out of each stack, keeping bottom-to-top order.
     const lifted = new Map<number, number[]>();
     for (const f of moved) {
@@ -232,6 +293,12 @@ export class FoldBook {
       this.stacks.set(key, stack);
     }
     this.reindex();
+  }
+
+  /** True if a face's edge lies along a line. */
+  private edgeOn(line: MirrorLine, f: number, k: number): boolean {
+    const i = f * 6, n = (k + 1) % CORNERS;
+    return sideOf(line, this.at[i + k * 2] as number, this.at[i + k * 2 + 1] as number) === 0 && sideOf(line, this.at[i + n * 2] as number, this.at[i + n * 2 + 1] as number) === 0;
   }
 
   private reindex(): void {
@@ -381,6 +448,7 @@ export class FoldBook {
     copy.at = this.at.slice();
     copy.flipped = this.flipped.slice();
     copy.cut = this.cut.slice();
+    copy.creased = this.creased.slice();
     copy.layer = this.layer.slice();
     copy.stacks = new Map([...this.stacks].map(([key, stack]) => [key, [...stack]]));
     return copy;

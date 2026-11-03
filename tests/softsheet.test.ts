@@ -4,6 +4,8 @@ import { UNITS_PER_CELL as U } from '@/core/fold/lattice';
 import type { LineKind, MirrorLine } from '@/core/fold/lattice';
 import { SheetPiece } from '@/core/fold/SheetPiece';
 import { buildSoftMesh } from '@/core/fold/soft/softMesh';
+import { SheetView } from '@/core/render/SheetView';
+import { LineSegments } from 'three';
 import { FoldBook } from '@/core/fold/FoldBook';
 import { foldRequest, RECIPES } from '@/core/fold/recipes';
 import type { Recipe } from '@/core/fold/recipes';
@@ -565,6 +567,46 @@ describe('hardening', () => {
     expect(piece.soft.hardened).toBe(true);
     piece.harden(false);
     expect(piece.soft.hardened).toBe(false);
+  });
+});
+
+describe('opening a fold back out', () => {
+  it('lays the flap flat beside the paper it turns on, softer along the old crease', () => {
+    const piece = new SheetPiece(sheet);
+    foldAll(piece, line('x', 5), 1);
+    run(piece, 20);
+    const top = piece.book.faces.find((f) => piece.book.flipped[f] === 1 && piece.book.stackOf(f).at(-1) === f) as number;
+    const plan = piece.unfold(top);
+    expect(plan?.failure).toBeNull();
+    expect(piece.book.tallest).toBe(1);
+    expect(piece.soft.mesh.triCount).toBe(800);
+    expect(piece.soft.mesh.hingeCreased.reduce((sum, h) => sum + h, 0)).toBeGreaterThan(10);
+    run(piece, 60);
+    let wide = -Infinity, narrow = Infinity;
+    for (let i = 0; i < piece.soft.x.length; i += 3) {
+      wide = Math.max(wide, piece.soft.x[i] as number);
+      narrow = Math.min(narrow, piece.soft.x[i] as number);
+    }
+    // The whole 10 m width again, lying flat.
+    expect(wide - narrow).toBeGreaterThan(9.8);
+    expect(heights(piece).top).toBeLessThan(0.1);
+  });
+
+  it('draws the opened crease as a mark, and none on paper never folded', () => {
+    const marked = (piece: SheetPiece) => {
+      const view = new SheetView(piece);
+      view.update();
+      const count = view.group.children.filter((c) => c instanceof LineSegments).reduce((sum, c) => sum + ((c as LineSegments).geometry.getAttribute('position')?.count ?? 0), 0);
+      view.dispose();
+      return count;
+    };
+    const fresh = new SheetPiece(sheet);
+    expect(marked(fresh)).toBe(0);
+    const piece = new SheetPiece(sheet);
+    foldAll(piece, line('x', 5), 1);
+    const top = piece.book.faces.find((f) => piece.book.flipped[f] === 1 && piece.book.stackOf(f).at(-1) === f) as number;
+    piece.unfold(top);
+    expect(marked(piece)).toBeGreaterThan(0);
   });
 });
 
