@@ -25,9 +25,11 @@ export interface Intent {
   press: boolean;
   /** Metres to raise the hands, or lower them if negative. */
   raise: number;
+  /** Spring off the ground, if standing on it. */
+  jump: boolean;
 }
 
-export const IDLE: Intent = { move: { x: 0, z: 0 }, run: false, grab: false, press: false, raise: 0 };
+export const IDLE: Intent = { move: { x: 0, z: 0 }, run: false, grab: false, press: false, raise: 0, jump: false };
 
 /** A hand on paper. */
 export interface Grip {
@@ -57,19 +59,25 @@ export interface Grip {
 interface Foothold {
   piece: SheetPiece;
   pin: Pin;
+  /** The bottom face stood on, and where on the flat sheet, to stand on it again when the cloth is rebuilt. */
+  face: number;
+  flat: { x: number; z: number };
   /** Where on the ground the feet were planted. */
   x: number;
   z: number;
 }
 
-export type Action = 'idle' | 'walk' | 'run' | 'reach' | 'hold' | 'strain' | 'press' | 'stumble';
+export type Action = 'idle' | 'walk' | 'run' | 'reach' | 'hold' | 'strain' | 'press' | 'stumble' | 'jump';
 
 export interface Being {
   readonly id: number;
   x: number;
   z: number;
+  /** Height of the feet off the ground: above 0 only in the air. */
+  y: number;
   vx: number;
   vz: number;
+  vy: number;
   /** Radians around y; 0 faces +z. */
   facing: number;
   handHeight: number;
@@ -93,7 +101,7 @@ export interface Being {
   stumbling: number;
 }
 
-export type SimEventKind = 'grab' | 'whiff' | 'release' | 'slip' | 'press' | 'unfold' | 'refuse' | 'wobble';
+export type SimEventKind = 'grab' | 'whiff' | 'release' | 'slip' | 'press' | 'unfold' | 'refuse' | 'jump' | 'land';
 
 /** Something worth showing: what happened, to whom, where, and why if refused. */
 export interface SimEvent {
@@ -135,8 +143,10 @@ export class GameSim {
         id,
         x: start.x,
         z: start.z,
+        y: 0,
         vx: 0,
         vz: 0,
+        vy: 0,
         facing: start.facing,
         handHeight: RULES.handRest,
         hand: { x: start.x, y: RULES.handRest, z: start.z },
@@ -164,6 +174,8 @@ export class GameSim {
     for (const being of this.beings) {
       being.body.x = being.x;
       being.body.z = being.z;
+      being.body.bottom = being.y + RULES.bodyBottom;
+      being.body.top = being.y + RULES.bodyTop;
       this.plantFeet(being);
       this.aimHands(being);
     }
@@ -184,13 +196,16 @@ export class GameSim {
     const pace = (intent.run ? RULES.runSpeed : RULES.walkSpeed) * (being.grip ? RULES.carryingPace / thick : 1);
     const wantX = steering && length > 0 ? (intent.move.x / Math.hypot(intent.move.x, intent.move.z)) * length * pace : 0;
     const wantZ = steering && length > 0 ? (intent.move.z / Math.hypot(intent.move.x, intent.move.z)) * length * pace : 0;
-    const k = 1 - Math.exp(-RULES.acceleration * dt);
+    // In the air, a being keeps most of the way it was going.
+    const airborne = being.y > 0;
+    const k = 1 - Math.exp(-RULES.acceleration * (airborne ? RULES.airControl : 1) * dt);
     being.vx += (wantX - being.vx) * k;
     being.vz += (wantZ - being.vz) * k;
     being.stepX = being.vx * dt;
     being.stepZ = being.vz * dt;
     being.x += being.stepX;
     being.z += being.stepZ;
+    this.leap(being, steering && intent.jump, dt);
 
     // Holding paper, a being faces it; otherwise it faces where it is going.
     let face: number | null = null;
@@ -208,6 +223,21 @@ export class GameSim {
       else this.grab(being);
     }
     if (intent.press && being.grip) this.press(being);
+  }
+
+  /** Springs off the ground when asked and standing, falls, and lands. */
+  private leap(being: Being, jump: boolean, dt: number): void {
+    if (jump && being.y === 0) {
+      being.vy = RULES.jumpSpeed;
+      this.emit('jump', being, { x: being.x, y: 0, z: being.z });
+    }
+    if (being.y === 0 && being.vy <= 0) return;
+    being.vy -= RULES.gravity * dt;
+    being.y += being.vy * dt;
+    if (being.y > 0) return;
+    being.y = 0;
+    being.vy = 0;
+    this.emit('land', being, { x: being.x, y: 0, z: being.z });
   }
 
   /** Beings cannot stand inside each other. */
@@ -234,7 +264,7 @@ export class GameSim {
   private grab(being: Being): void {
     const at = {
       x: being.x + Math.sin(being.facing) * RULES.grabAhead,
-      y: RULES.grabHeight,
+      y: being.y + RULES.grabHeight,
       z: being.z + Math.cos(being.facing) * RULES.grabAhead,
     };
     being.reaching = RULES.reachSeconds;
@@ -290,7 +320,7 @@ export class GameSim {
   private aimHands(being: Being): void {
     const reach = being.grip ? RULES.arm : RULES.grabAhead;
     being.hand.x = being.x + Math.sin(being.facing) * reach;
-    being.hand.y = being.handHeight;
+    being.hand.y = being.y + being.handHeight;
     being.hand.z = being.z + Math.cos(being.facing) * reach;
     const grip = being.grip;
     if (!grip) return;
@@ -383,6 +413,8 @@ export class GameSim {
       if (being.foothold?.piece === piece) being.foothold = null;
     }
     this.regrip(piece);
+    // The paper underfoot may have moved or been covered: feet find what lies under them now.
+    for (const being of this.beings) if (!being.foothold) this.plantFeet(being);
   }
 
   /** The cloth was rebuilt, so every hand takes a fresh hold at the same flat point. */
@@ -402,27 +434,36 @@ export class GameSim {
         grip.pin = soft.addPin(tri, b0, b1, b2);
         Object.assign(grip.pin, { x: old.x, y: old.y, z: old.z, heldX: old.heldX, heldY: old.heldY, heldZ: old.heldZ });
       }
-      if (being.foothold?.piece === piece) being.foothold = null;
+      // Feet stay on the very paper they stood on, even if a hand is lifting it: standing
+      // on paper holds it down. A step with nothing underfoot would let a hand yank the sheet.
+      const hold = being.foothold;
+      if (hold?.piece === piece) {
+        being.foothold = null;
+        if (book.faces.includes(hold.face)) {
+          const tri = soft.mesh.faceTri[hold.face] as number;
+          const [b0, b1, b2] = weightsIn(piece, tri, hold.flat);
+          being.foothold = { ...hold, pin: soft.addPin(tri, b0, b1, b2) };
+        } else this.plantFeet(being);
+      }
     }
   }
 
   // ---- Feet ----
 
-  /** Feet on paper lying on the ground hold it down, planted afresh as the being walks. */
+  /** Feet on paper lying on the ground hold it down, planted afresh as the being walks. In the air they let go. */
   private plantFeet(being: Being): void {
     const hold = being.foothold;
-    if (hold && Math.hypot(being.x - hold.x, being.z - hold.z) < RULES.footStep) return;
+    if (hold && being.y === 0 && Math.hypot(being.x - hold.x, being.z - hold.z) < RULES.footStep) return;
     if (hold) hold.piece.soft.removePin(hold.pin);
     being.foothold = null;
-    if (being.stumbling > 0) return;
+    if (being.stumbling > 0 || being.y > 0) return;
     for (const piece of this.pieces) {
       const under = paperUnder(piece, being.x, being.z);
       if (!under || under.y > RULES.footReach) continue;
+      // Paper under a being's weight stays where it is, and a hand can lift the paper
+      // beside the feet only as far as the paper reaches from them.
       const pin = piece.soft.addPin(under.tri, under.b0, under.b1, under.b2);
-      // Feet press down; they do not stop other hands reaching, and paper can slide from under them.
-      pin.strength = RULES.footStrength;
-      pin.anchoring = false;
-      being.foothold = { piece, pin, x: being.x, z: being.z };
+      being.foothold = { piece, pin, face: outerFace(piece, under.tri, false), flat: flatOf(piece, under), x: being.x, z: being.z };
       return;
     }
   }
@@ -468,17 +509,6 @@ export class GameSim {
         being.vz = (intent.move.z / away) * RULES.stumbleSpeed;
       }
     }
-    const hold = being.foothold;
-    if (hold) {
-      worldOf(hold.piece, hold.pin, this.point);
-      if (Math.hypot(this.point.x - hold.pin.heldX, this.point.z - hold.pin.heldZ) > RULES.footSlide) {
-        // The paper is dragged out from under the feet: they lose it and wobble.
-        hold.piece.soft.removePin(hold.pin);
-        being.foothold = null;
-        being.stumbling = Math.max(being.stumbling, RULES.wobbleSeconds);
-        this.emit('wobble', being, this.point);
-      }
-    }
   }
 
   /** What a being is doing, for its body to show. */
@@ -488,6 +518,7 @@ export class GameSim {
     if (being.grip && being.pushing) return 'strain';
     if (being.reaching > 0) return 'reach';
     if (being.grip) return 'hold';
+    if (being.y > 0) return 'jump';
     const speed = Math.hypot(being.vx, being.vz);
     return speed > RULES.walkSpeed * 1.2 ? 'run' : speed > 0.25 ? 'walk' : 'idle';
   }

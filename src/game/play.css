@@ -170,6 +170,13 @@ body {
   line-height: 1.9;
 }
 
+/* A key and what it does stay together on one line. */
+.hud-help span {
+  display: inline-block;
+  margin-right: 10px;
+  white-space: nowrap;
+}
+
 .hud-help kbd {
   padding: 1px 6px;
   border-radius: 4px;

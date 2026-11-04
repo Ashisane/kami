@@ -58,9 +58,10 @@ export interface Pin {
 }
 
 /**
- * Something standing in the paper's way, such as a being: an upright capsule paper
- * cannot pass through. It starts a little above the ground, so paper underfoot is
- * stood on, not shoved aside.
+ * Something standing in the paper's way, such as a being: an upright capsule that
+ * hardened paper cannot pass through. Soft paper passes through bodies: a sheet that
+ * shoved at everyone walking on it, and wrapped round anyone carrying it, fought
+ * every move a player made.
  */
 export interface Body {
   x: number;
@@ -208,7 +209,7 @@ export class SoftSheet {
     readonly mesh: SoftMesh,
     settings: Partial<SoftSettings> = {},
     initial?: Float64Array,
-    /** Bodies the paper wraps around and is pushed aside by. Move them freely; they are read every substep. */
+    /** Bodies that push hardened paper aside. Move them freely; they are read every substep. */
     readonly bodies: Body[] = [],
   ) {
     this.settings = { ...DEFAULT_SOFT, ...settings };
@@ -383,6 +384,8 @@ export class SoftSheet {
       this.moveHands(h);
       this.solvePins();
       if (rigid) {
+        // Only hardened paper is solid enough for a body to shove.
+        this.solveBodies();
         this.solveGround();
         this.solveSolid();
       } else {
@@ -391,8 +394,6 @@ export class SoftSheet {
         // Twice, because a hanging sheet puts all its weight through a few edges.
         this.solveDistances();
         this.solveDistances();
-        // Last, so no paper is left inside a body at the end of a substep.
-        this.solveBodies();
         this.solveGround();
       }
       this.updateVelocity(h);
@@ -519,42 +520,40 @@ export class SoftSheet {
   }
 
   /**
-   * Pushes paper out of every body, to just outside its skin. Points first, then the
-   * middle of every edge, because an edge can be longer than a body is wide.
+   * Shoves hardened paper out of every body, as one piece: the deepest any point or
+   * edge middle is inside a body is how far the whole solid moves, sideways, so it
+   * clears the body without bending. Edge middles count because an edge can be
+   * longer than a body is wide.
    */
   private solveBodies(): void {
     const { x, w } = this;
     const { edges } = this.mesh;
-    const skin = CONTACT_GAP;
+    const reach = (body: Body) => body.radius + CONTACT_GAP;
     const point = this.bodyPoint;
     for (const body of this.bodies) {
-      const reach = body.radius + skin;
+      let pushX = 0, pushZ = 0, deepest = 0;
+      const feel = (px: number, py: number, pz: number) => {
+        point.x = px;
+        point.y = py;
+        point.z = pz;
+        if (!outOf(body, reach(body), point)) return;
+        const dx = point.x - px, dz = point.z - pz;
+        const depth = dx * dx + dz * dz;
+        if (depth <= deepest) return;
+        deepest = depth;
+        pushX = dx;
+        pushZ = dz;
+      };
       for (let e = 0; e < edges.length; e += 2) {
         const a = (edges[e] as number) * 3, b = (edges[e + 1] as number) * 3;
-        const wa = w[a / 3] as number, wb = w[b / 3] as number;
-        if (wa + wb === 0) continue;
-        point.x = ((x[a] as number) + (x[b] as number)) / 2;
-        point.y = ((x[a + 1] as number) + (x[b + 1] as number)) / 2;
-        point.z = ((x[a + 2] as number) + (x[b + 2] as number)) / 2;
-        if (!outOf(body, reach, point)) continue;
-        // Move both ends by what the middle had to move, the lighter end more.
-        const dx = point.x - ((x[a] as number) + (x[b] as number)) / 2;
-        const dy = point.y - ((x[a + 1] as number) + (x[b + 1] as number)) / 2;
-        const dz = point.z - ((x[a + 2] as number) + (x[b + 2] as number)) / 2;
-        const ka = (2 * wa) / (wa + wb), kb = (2 * wb) / (wa + wb);
-        x[a] = (x[a] as number) + dx * ka; x[a + 1] = (x[a + 1] as number) + dy * ka; x[a + 2] = (x[a + 2] as number) + dz * ka;
-        x[b] = (x[b] as number) + dx * kb; x[b + 1] = (x[b + 1] as number) + dy * kb; x[b + 2] = (x[b + 2] as number) + dz * kb;
+        feel(((x[a] as number) + (x[b] as number)) / 2, ((x[a + 1] as number) + (x[b + 1] as number)) / 2, ((x[a + 2] as number) + (x[b + 2] as number)) / 2);
       }
+      for (let j = 0; j < x.length; j += 3) feel(x[j] as number, x[j + 1] as number, x[j + 2] as number);
+      if (deepest === 0) continue;
       for (let i = 0; i < w.length; i++) {
         if (w[i] === 0) continue;
-        const j = i * 3;
-        point.x = x[j] as number;
-        point.y = x[j + 1] as number;
-        point.z = x[j + 2] as number;
-        if (!outOf(body, reach, point)) continue;
-        x[j] = point.x;
-        x[j + 1] = point.y;
-        x[j + 2] = point.z;
+        x[i * 3] = (x[i * 3] as number) + pushX;
+        x[i * 3 + 2] = (x[i * 3 + 2] as number) + pushZ;
       }
     }
   }

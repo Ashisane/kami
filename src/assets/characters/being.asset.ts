@@ -222,7 +222,39 @@ function clips() {
     ]),
   ]);
 
-  return [idle, walk, run, reach, hold, strain, press, stumble];
+  // Springing off the ground: a stretch up out of the legs, arms flung high, legs split
+  // in the air, then easing into a float it holds until it lands.
+  const J = 0.45;
+  const jumpArm = (side: 'left' | 'right', high: number) =>
+    hinge(`arm_${side}`, 'x', J, [
+      { at: 0, value: 10 },
+      { at: 0.12, value: -high, ease: outCubic },
+      { at: J, value: -high + 10, ease: inOutCubic },
+    ]);
+  const jumpLeg = (side: 'left' | 'right', swingTo: number) =>
+    hinge(`leg_${side}`, 'x', J, [
+      { at: 0, value: 0 },
+      { at: 0.15, value: swingTo, ease: outCubic },
+      { at: J, value: swingTo * 0.75, ease: inOutCubic },
+    ]);
+  const jump = clip('jump', J, [
+    jumpArm('left', 125),
+    jumpArm('right', 115),
+    jumpLeg('left', -32),
+    jumpLeg('right', 22),
+    hinge('hips', 'x', J, [
+      { at: 0, value: 6 },
+      { at: 0.15, value: -6, ease: outCubic },
+      { at: J, value: -3, ease: inOutCubic },
+    ]),
+    scale('hips', J, [
+      { at: 0, value: [1.08, 0.88, 1.08] },
+      { at: 0.07, value: [0.9, 1.16, 0.9], ease: outCubic },
+      { at: J, value: [1, 1, 1], ease: spring(3, 0.35) },
+    ]),
+  ]);
+
+  return [idle, walk, run, reach, hold, strain, press, stumble, jump];
 }
 
 export default defineAsset({
@@ -232,7 +264,7 @@ export default defineAsset({
   status: 'blockout',
   description: 'A 1 m crew member folded from paper. Holds paper by both hands.',
   source: { kind: 'procedural', build },
-  clips: ['idle', 'walk', 'run', 'reach', 'hold', 'strain', 'press', 'stumble'],
+  clips: ['idle', 'walk', 'run', 'reach', 'hold', 'strain', 'press', 'stumble', 'jump'],
   sockets: {
     hand_left: { node: 'socket_hand_left', description: 'Where the left hand grips paper.' },
     hand_right: { node: 'socket_hand_right', description: 'Where the right hand grips paper.' },

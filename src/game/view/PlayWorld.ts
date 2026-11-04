@@ -38,7 +38,8 @@ const JUICE: Partial<Record<SimEvent['kind'], { shake: number; scraps: number; p
   unfold: { shake: 0.22, scraps: 16, power: 0.8 },
   slip: { shake: 0.26, scraps: 14, power: 0.9 },
   refuse: { shake: 0.12, scraps: 0, power: 0 },
-  wobble: { shake: 0.08, scraps: 3, power: 0.3 },
+  jump: { shake: 0, scraps: 3, power: 0.25 },
+  land: { shake: 0.07, scraps: 5, power: 0.35 },
 };
 
 /**
@@ -153,6 +154,7 @@ export class PlayWorld {
     this.recent.push(event);
     if (this.recent.length > 40) this.recent.shift();
     this.hud.tell(event);
+    if (event.kind === 'land') this.beings[event.being]?.land();
     const juice = JUICE[event.kind];
     if (!juice) return;
     // Only what the selected being does, or what lands near it, shakes the screen.

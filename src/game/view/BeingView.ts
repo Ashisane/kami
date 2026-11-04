@@ -9,7 +9,7 @@ import { RULES } from '../sim/rules';
 
 const ASSET = 'character.being';
 /** Clips that play once and hold their last frame; the rest loop. */
-const ONCE: ReadonlySet<Action> = new Set(['reach', 'press', 'stumble']);
+const ONCE: ReadonlySet<Action> = new Set(['reach', 'press', 'stumble', 'jump']);
 const FADE = 0.14;
 
 /**
@@ -32,7 +32,7 @@ export class BeingView {
 
   update(being: Being, action: Action, dt: number): void {
     const { root } = this.instance;
-    root.position.set(being.x, 0, being.z);
+    root.position.set(being.x, being.y, being.z);
     root.rotation.y = being.facing;
     if (action !== this.current) {
       this.action = this.instance.play(action, { loop: !ONCE.has(action), fade: FADE });
@@ -47,6 +47,11 @@ export class BeingView {
     const s = this.squash.update(dt);
     root.scale.set(1 + (1 - s) * 0.5, s, 1 + (1 - s) * 0.5);
     this.instance.update(dt);
+  }
+
+  /** Feet back on the ground: the body squashes under its own fall and springs back. */
+  land(): void {
+    this.squash.kick(-3.4);
   }
 
   dispose(): void {

@@ -11,8 +11,9 @@ with real keys and saves `.shots/play-*.png`.
 | --- | --- |
 | 1 2 3 | Choose the being the keys steer. The camera glides over |
 | W A S D | Walk, relative to where the camera looks. Shift runs |
+| Space | Jump |
 | E | Take hold of the paper in reach, or let go |
-| Space | Press the held paper down: crease it, or open a flap back out |
+| F | Press the held paper down: crease it, or open a flap back out |
 | Wheel | Raise or lower the hands |
 | Right drag, or click to lock the pointer | Look around |
 | R | A fresh sheet, and the crew back at the start |
@@ -47,16 +48,22 @@ Each one is a test in `tests/game.test.ts`, played headless.
 | Two pull apart | Both strain; one grip gives |
 | Lift the sheet | Raised hands lift it between them. Let go and it comes down |
 | Fold | Carry paper over a fold line and press. It creases on the snapped line, and hands on paper that moved let go |
+| Fold alone | Stand on the sheet, take a corner, and walk across it: the corner comes over, the paper underfoot stays put |
 | Fold with someone on the moving paper | Refused: someone is standing on it |
 | Unfold | Take a flap, carry it back across its crease, and press. The crease stays as a faint line |
-| Stand on paper | Feet hold it down. Dragged hard, it slides out from under, and the being wobbles |
-| Walk into hanging paper | It is pushed aside, never through a being |
+| Walk onto the sheet | It does not move |
+| Stand on paper | Feet hold it as firmly as a hand. Pulling it from under someone only strains, then the grip slips |
+| Walk into hanging paper | Soft paper passes through beings. Only hardened paper, a finished craft, is pushed aside |
+| Jump | About 0.4 m, half a second in the air. Feet let go of the paper in the air and stand on it again on landing |
 
 ## What was learned
 
-- **Folding is a crew job.** Alone, a being dragging an edge across drags the whole
-  sheet with it, and folded it over its own head. One holds the far edge; the
-  other carries a corner along beside the sheet.
+- **Paper that shoves back is friction.** Bodies pushing soft paper aside made the
+  sheet slide away from anyone stepping on it, and wrap round anyone carrying it,
+  stretching 40% into what looked like tears. Soft paper now passes through bodies.
+- **Standing on paper holds it.** Feet that held weakly let a hand drag the whole
+  sheet, feet included. Feet now hold like a hand, count for the reach rule, and
+  stay on the same paper when the cloth is rebuilt, so one being can fold alone.
 - **Taut paper must stop a being, never drag one.** Snapping a being back to its
   hands made the weight of a held sheet walk two holders towards each other. Only
   the part of a step that took the hands past the paper's reach is undone.
@@ -64,6 +71,9 @@ Each one is a test in `tests/game.test.ts`, played headless.
   hand gets only as far as the paper spans from the other hands.
 - **A flap a hand carried open is already where it lands.** Laying it out by the
   frame of the paper it joins stretched it 43% wherever that paper was held up.
+- **A fold snaps from grid line to grid line.** Each time it moves on, the paper still
+  curled at the last line pulls up to 5% for a sixth of a second as it straightens.
+  The cloth is one surface, so this never opens a gap.
 - **Big flaps swing rubbery.** Carried fast, a 3.5 m flap stretches up to 12% for a
   moment before it settles. Lifted at two points and dropped, stiff paper can leave a
   ridge standing, like card.

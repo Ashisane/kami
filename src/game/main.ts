@@ -43,6 +43,7 @@ function installDebugApi(world: PlayWorld): void {
           return {
             x: being.x,
             z: being.z,
+            y: being.y,
             facing: being.facing,
             action: sim.action(being),
             holding: !!being.grip,

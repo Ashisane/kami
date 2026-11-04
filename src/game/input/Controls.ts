@@ -13,9 +13,10 @@ const PITCH_HIGH = 1.25;
  * relative to where the camera looks. Presses that happen once, grab and press, are
  * held until the sim takes them, so a quick tap between steps is never lost.
  *
- * WASD walk, Shift runs, E grabs or lets go, Space presses paper down, the wheel
- * raises or lowers the hands, 1 2 3 choose a being, R lays out a fresh sheet. The mouse looks around while the
- * pointer is locked (click the world), or while the right button is held.
+ * WASD walk, Shift runs, Space jumps, E grabs or lets go, F presses paper down, the
+ * wheel raises or lowers the hands, 1 2 3 choose a being, R lays out a fresh sheet.
+ * The mouse looks around while the pointer is locked (click the world), or while
+ * the right button is held.
  */
 export class Controls {
   /** Which being the keys steer. */
@@ -26,6 +27,7 @@ export class Controls {
   private readonly held = new Set<string>();
   private grab = false;
   private press = false;
+  private jump = false;
   private raise = 0;
   private looking = false;
   private readonly listeners = new Set<() => void>();
@@ -70,9 +72,11 @@ export class Controls {
       grab: this.grab,
       press: this.press,
       raise: this.raise,
+      jump: this.jump,
     };
     this.grab = false;
     this.press = false;
+    this.jump = false;
     this.raise = 0;
     return intents;
   }
@@ -88,10 +92,11 @@ export class Controls {
     const digit = Number(event.key);
     if (Number.isInteger(digit) && digit >= 1 && digit <= this.beings) this.select(digit - 1);
     if (event.code === 'KeyE') this.grab = true;
+    if (event.code === 'KeyF') this.press = true;
     if (event.code === 'KeyR') for (const listener of this.resets) listener();
     if (event.code === 'Space') {
       event.preventDefault();
-      this.press = true;
+      this.jump = true;
     }
     this.held.add(event.code);
   };

@@ -572,37 +572,52 @@ describe('hardening', () => {
 });
 
 describe('bodies and hands', () => {
-  it('never lets paper pass through a body, however it is swept across it', () => {
+  it('lets soft paper pass through a body, so a sheet never fights whoever is in it', () => {
+    // The same sweep twice, with a body standing in its way and without: the paper does the same.
+    const sweep = (withBody: boolean) => {
+      const piece = new SheetPiece(sheet);
+      if (withBody) piece.bodies.push({ x: 0, z: 0, bottom: 0.15, top: 0.78, radius: 0.22 });
+      const { soft } = piece;
+      let corner = 0, best = Infinity;
+      for (let t = 0; t < soft.mesh.triCount; t++) {
+        const v = (soft.mesh.tris[t * 3] as number) * 2;
+        const d = Math.hypot((soft.mesh.flat[v] as number) + 5, (soft.mesh.flat[v + 1] as number) + 5);
+        if (d < best) {
+          best = d;
+          corner = t;
+        }
+      }
+      const hand = soft.addPin(corner, 1 / 3, 1 / 3, 1 / 3);
+      for (let i = 0; i < 150; i++) {
+        const t = Math.min(1, i / 110);
+        hand.x = -5 + t * 10;
+        hand.z = -5 + t * 10;
+        hand.y = 0.5;
+        piece.step(DT);
+      }
+      return piece.soft.x;
+    };
+    const through = sweep(true), clear = sweep(false);
+    let apart = 0;
+    for (let i = 0; i < through.length; i++) apart = Math.max(apart, Math.abs((through[i] as number) - (clear[i] as number)));
+    expect(apart).toBeLessThan(1e-9);
+  });
+
+  it('pushes hardened paper aside as one solid piece', () => {
     const piece = new SheetPiece(sheet);
-    const body = { x: 0, z: 0, bottom: 0.15, top: 0.78, radius: 0.22 };
+    run(piece, 10);
+    piece.harden(true);
+    const body = { x: -5.6, z: 0, bottom: 0.15, top: 0.78, radius: 0.22 };
     piece.bodies.push(body);
-    const { soft } = piece;
-    let corner = 0, best = Infinity;
-    for (let t = 0; t < soft.mesh.triCount; t++) {
-      const v = (soft.mesh.tris[t * 3] as number) * 2;
-      const d = Math.hypot((soft.mesh.flat[v] as number) + 5, (soft.mesh.flat[v + 1] as number) + 5);
-      if (d < best) {
-        best = d;
-        corner = t;
-      }
-    }
-    const hand = soft.addPin(corner, 1 / 3, 1 / 3, 1 / 3);
-    let deepest = 0;
-    for (let i = 0; i < 150; i++) {
-      const t = Math.min(1, i / 110);
-      hand.x = -5 + t * 10;
-      hand.z = -5 + t * 10;
-      hand.y = 0.5;
+    const westmost = () => Math.min(...Array.from(piece.soft.x).filter((_, i) => i % 3 === 0));
+    const before = westmost();
+    for (let i = 0; i < 60; i++) {
+      body.x = -5.6 + (i / 59) * 1.2;
       piece.step(DT);
-      const { x } = piece.soft;
-      for (let j = 0; j < x.length; j += 3) {
-        const y = x[j + 1] as number;
-        if (y < body.bottom || y > body.top) continue;
-        deepest = Math.max(deepest, body.radius - Math.hypot((x[j] as number) - body.x, (x[j + 2] as number) - body.z));
-      }
     }
-    console.log('deepest any paper went into the body', deepest.toFixed(3), 'm');
-    expect(deepest).toBeLessThan(0.05);
+    // Walked 0.8 m into the sheet's edge, the body has pushed it along.
+    expect(westmost() - before).toBeGreaterThan(0.4);
+    expect(piece.soft.stretch()).toBeLessThan(0.01);
   });
 
   it('keeps a body after the cloth is rebuilt by a fold', () => {

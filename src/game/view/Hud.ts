@@ -6,9 +6,19 @@ const SAYS: Partial<Record<SimEvent['kind'], string>> = {
   slip: 'The paper pulled out of their hands.',
   press: 'Creased.',
   unfold: 'Opened back out.',
-  wobble: 'The paper slid out from underfoot.',
 };
 const MESSAGE_SECONDS = 2.4;
+/** The keys, and what each does, in the order a player learns them. */
+const HELP: readonly [string, string][] = [
+  ['WASD', 'walk'],
+  ['Shift', 'run'],
+  ['Space', 'jump'],
+  ['E', 'grab or let go'],
+  ['F', 'press it down'],
+  ['Wheel', 'raise hands'],
+  ['Right drag', 'look'],
+  ['R', 'fresh sheet'],
+];
 
 /**
  * The crew along the bottom, one card each, and a line of news at the top. The
@@ -41,7 +51,13 @@ export class Hud {
     });
     const help = document.createElement('p');
     help.className = 'hud-help';
-    help.innerHTML = '<kbd>WASD</kbd> walk <kbd>Shift</kbd> run <kbd>E</kbd> grab or let go <kbd>Space</kbd> press it down <kbd>Wheel</kbd> raise hands <kbd>Right drag</kbd> look <kbd>R</kbd> fresh sheet';
+    for (const [key, does] of HELP) {
+      const pair = document.createElement('span');
+      const kbd = document.createElement('kbd');
+      kbd.textContent = key;
+      pair.append(kbd, ` ${does}`);
+      help.append(pair);
+    }
     this.element.append(this.message, crew, help);
   }
 
@@ -79,6 +95,7 @@ function statusOf(being: Being, action: string): string {
   if (being.grip?.unfolding) return 'Opening a fold';
   if (being.grip?.aim?.reachable) return 'Ready to crease';
   if (being.grip) return 'Holding paper';
+  if (being.y > 0) return 'In the air';
   if (being.foothold) return 'Standing on paper';
   return 'Free hands';
 }

@@ -109,10 +109,10 @@ try {
   s = await state();
   check('carried over, the fold lines up', s.beings[0].ready, `Marigold at ${s.beings[0].x.toFixed(2)}, ${s.beings[0].z.toFixed(2)}`);
   await shot('fold-lined-up');
-  await tap('Space');
+  await tap('KeyF');
   await wait(1200);
   s = await state();
-  check('Space creases it, and the hands let go', s.tallest === 2 && !s.beings[0].holding, `${s.tallest} layers`);
+  check('F creases it, and the hands let go', s.tallest === 2 && !s.beings[0].holding, `${s.tallest} layers`);
   await shot('folded');
 
   // 4. Marigold walks back along the flap that landed, turns to face it, takes it, and
@@ -130,10 +130,10 @@ try {
   s = await state();
   check('carried back across its crease, it is ready to open', s.beings[0].unfolding);
   await shot('unfold-lined-up');
-  await tap('Space');
+  await tap('KeyF');
   await wait(1200);
   s = await state();
-  check('Space opens it back out', s.tallest === 1, `${s.tallest} layers`);
+  check('F opens it back out', s.tallest === 1, `${s.tallest} layers`);
   await shot('unfolded');
 
   // 5. R lays out a fresh sheet. Teal and Sakura take the east and south edges and hold
@@ -207,6 +207,51 @@ try {
   s = await state();
   check('let go, nobody holds the paper any more', s.beings.every((b) => !b.holding));
   await shot('dropped');
+
+  // 9. Alone on a fresh sheet: Marigold walks on, jumps, then takes the south-west
+  // corner and carries it across the sheet herself, and presses it down.
+  await tap('KeyR');
+  await wait(1200);
+  const SW = (-3 * Math.PI) / 4;
+  const NE = Math.PI / 4;
+  const laid = (await state()).paperSpan;
+  await steer('Digit1', EAST);
+  await holdUntil(['KeyW'], (w) => w.beings[0].x > -3.5);
+  s = await state();
+  const shift = Math.max(...['minX', 'maxX', 'minZ', 'maxZ'].map((k) => Math.abs(s.paperSpan[k] - laid[k])));
+  check('walking onto the sheet does not shove it', shift < 0.005 && s.beings[0].standing, `edges moved ${(shift * 100).toFixed(2)} cm`);
+  await page.keyboard.press('Space');
+  await wait(140);
+  s = await state();
+  check('Space jumps', s.beings[0].y > 0.15, `${s.beings[0].y.toFixed(2)} m up`);
+  await shot('jump');
+  await wait(900);
+  s = await state();
+  check('and the being lands, standing on the paper again', s.beings[0].y === 0 && s.beings[0].standing && s.events.some((e) => e === '0:land'));
+  await look(SOUTH);
+  await holdUntil(['KeyW'], (w) => w.beings[0].z < -3.8);
+  await look(WEST);
+  await holdUntil(['KeyW'], (w) => w.beings[0].x < -4.4);
+  await look(SW);
+  await grabWith(0);
+  s = await state();
+  check('alone, she takes hold of the corner', s.beings[0].holding, `held at ${s.beings[0].held.x.toFixed(2)}, ${s.beings[0].held.z.toFixed(2)}, standing at ${s.beings[0].x.toFixed(2)}, ${s.beings[0].z.toFixed(2)}${s.beings[0].standing ? " on paper" : " off it"}`);
+  await shot('solo-holding');
+  await look(NE);
+  await holdUntil(['KeyW'], (w) => {
+    if (process.env.TRACE) console.log('  carry', w.beings[0].x.toFixed(2), w.beings[0].z.toFixed(2), w.beings[0].standing ? 'on' : 'off', w.beings[0].action, 'far', ((w.paperSpan.maxX - laid.maxX) * 100).toFixed(1), ((w.paperSpan.maxZ - laid.maxZ) * 100).toFixed(1), 'stretch', (w.stretch * 100).toFixed(1));
+    return w.beings[0].ready && w.beings[0].x > -2.2;
+  }, 15000);
+  await wait(300);
+  s = await state();
+  const farMoved = Math.hypot(s.paperSpan.maxX - laid.maxX, s.paperSpan.maxZ - laid.maxZ);
+  check('carrying it across, the corner comes over and the rest stays put', s.beings[0].ready && farMoved < 0.1, `far edges moved ${(farMoved * 100).toFixed(1)} cm`);
+  await shot('solo-lined-up');
+  await tap('KeyF');
+  await wait(1200);
+  s = await state();
+  check('F creases it: folded by one being alone', s.tallest === 2, `${s.tallest} layers`);
+  await shot('solo-folded');
   console.log('frame time', s.frameMs.toFixed(1), 'ms');
 } catch (error) {
   problems.push(String(error));
